@@ -86,6 +86,18 @@ Tools: `open_logs`, `close_logs`, `overview`, `set_filters`, `patterns`, `patter
 
 ## Running it
 
+The best way is to use the binary.
+
+```bash
+sawmill app.log
+sawmill app.log.gz
+sawmill app1.log app2.log
+some-command 2>&1 | sawmill
+some-command 2>&1 | sawmill app.log
+```
+
+If you can't run it (ie your system isn't Linux amd64), cargo build it:
+
 ```bash
 cargo run --release -- app.log
 cargo run --release -- app.log.gz
