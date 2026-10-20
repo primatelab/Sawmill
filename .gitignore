@@ -1,1 +1,17 @@
 /target
+**/*.rs.bk
+
+# Editor metadata
+.vscode/
+.idea/
+
+# Cursor local files
+.cursor/
+
+# Local environment files
+.env
+.env.*
+
+# OS cruft
+.DS_Store
+Thumbs.db

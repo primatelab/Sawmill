@@ -1,0 +1,48 @@
+The Holding It For a Friend License (HIFFL) v0.2
+
+Copyright (c) 2026 Gordon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to use, copy,
+modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+and to permit others to do so, subject to the following conditions:
+
+1. This license and the above copyright notice shall be included in all copies or
+   substantial portions of the Software.
+2. The individual listed above (the "Alleged Author") denies authorship of this
+   Software and maintains that they are merely holding this Software for a third
+   party who reserves the right to anonymity (the "Friend").
+3. Any resemblance between the Alleged Author and the person who actually wrote
+   this Software is entirely coincidental, unless demonstrated by compelling
+   evidence, cryptographic signatures, or an unfortunately preserved Git history.
+4. Questions regarding who wrote this Software should be directed elsewhere. The
+   Alleged Author reserves the right to shrug, comment on the weather, or claim
+   they "just found it there."
+5. The Alleged Author maintains that if they actually were the author of this
+   Software (which they aren't), they would have written it for personal use,
+   not for commercial distribution (which really ought to be legal anyway).
+6. You agree that in the event the Software functions correctly, the credit
+   belongs to the Friend.
+7. You agree that in the event the Software fails catastrophically, you have never
+   heard of the Alleged Author or the Friend, and that you yourself were in fact
+   elsewhere at the time.
+
+Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, AND NONINFRINGEMENT. AND ALSO, UNLESS YOU HAVE A WARRANT, WE'RE
+DONE TALKING.
+
+Limitation of Liability
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE (OR DEALINGS OF ANY SORT, REALLY).
+
+Final Note
+
+If anyone asks, this repository was definitely being held for a friend. Questions
+about the identity of said friend are outside the scope of this license, and
+should be directed elsewhere.
