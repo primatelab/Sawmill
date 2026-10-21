@@ -96,7 +96,7 @@ some-command 2>&1 | sawmill
 some-command 2>&1 | sawmill app.log
 ```
 
-If you can't run it (ie your system isn't Linux amd64), cargo build it:
+If you can't run it (ie your system isn't Linux amd64, or Windows with WSL), cargo build it:
 
 ```bash
 cargo run --release -- app.log
