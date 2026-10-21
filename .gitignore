@@ -11,6 +11,7 @@
 # Local environment files
 .env
 .env.*
+notes.md
 
 # OS cruft
 .DS_Store

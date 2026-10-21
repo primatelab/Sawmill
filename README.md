@@ -1,7 +1,7 @@
 # Sawmill
 
 <p align="center">
-  <img src="sawmill.png" alt="Sawmill — Dissecting Logs" width="480">
+  <img src="sawmill.png" alt="Sawmill - Dissecting Logs" width="480">
 </p>
 
 Sawmill is a terminal app for dissecting logs. Point it at a file, a gzip, several files, or a pipe. It shows when the log happened, which lines are really the same line, and the raw text behind each group.
