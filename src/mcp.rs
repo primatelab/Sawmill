@@ -38,13 +38,21 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "\
 Sawmill cuts up logs. Open files with open_logs, then call overview to see the span, severity mix and the most common line shapes.
 
-Patterns are lines collapsed to a shape: the variable parts (numbers, addresses, UUIDs, paths, quoted strings) are replaced by uppercase mask names such as NUM and ADDR, so lines that differ only by an id group together. overview lists the masks in effect. A group is labelled by the severity most of its lines carry, not by its worst line, so one stray error does not mark hundreds of benign lines.
+Triage route:
+1) open_logs to load the files into a named session.
+2) overview for the lie of the land (kind, span, severity mix, top patterns).
+3) patterns to rank recurring line shapes by count.
+4) pattern_lines on interesting shapes to verify what they really are.
+5) context around representative line numbers to confirm local cause/effect.
+6) set_filters (levels/include/exclude/time/case_sensitive), then overview and timeline to quantify each hypothesis.
+7) lines (offset/around_line/at_time) to inspect windows after filtering.
+8) close_logs when done to free memory.
 
-The usual route: overview for the lie of the land, patterns for the ranked shapes, pattern_lines to read examples behind one shape, context for the raw neighbourhood of an interesting line, timeline to see when things clustered, and set_filters to narrow by level, regex or time before going round again.
+Patterns are lines collapsed to a shape: variable parts (numbers, addresses, UUIDs, paths, quoted strings) are replaced by uppercase mask names such as NUM and ADDR, so lines that differ only by an id group together. overview lists the masks in effect. A group is labelled by the severity most of its lines carry, not by its worst line, so one stray error does not mark hundreds of benign lines.
 
-Filters are session state and every read reflects them, so call overview if a count surprises you. Results are paged: ask for a small limit and follow next_offset. Regexes are case-insensitive unless you set case_sensitive, and %IP%, %UUID% and any macro from the config file expand inside them.
+Use MCP-first triage: start with these tools, not ad-hoc text parsing, unless you need a query this server cannot express. Results are paged: ask for a small limit and follow next_offset. Filters are session state and every read reflects them, so call overview whenever a count surprises you.
 
-Timestamps are only read near the start of a line, so dates inside a payload are ignored; a line with no timestamp of its own inherits the one before it, which keeps tracebacks with their record. A session holds the whole log in memory, so close_logs when you are done with it.
+Regexes are case-insensitive unless you set case_sensitive, and %IP%, %UUID% and any macro from the config file expand inside them. Timestamps are only read near the start of a line, so dates inside payloads are ignored; a line with no timestamp of its own inherits the one before it, which keeps tracebacks with their record.
 
 An access log is detected on its own. When quoted requests followed by a status outnumber syslog level tokens, lines are classed 5xx, 4xx, 2xx (3xx included), 1xx or OTHER instead of ERROR, WARN, INFO, DEBUG and OTHER. overview's kind field says \"web\" or \"system\". set_filters accepts either set of names.";
 
