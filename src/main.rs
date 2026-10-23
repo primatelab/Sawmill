@@ -296,6 +296,8 @@ fn lines<R: BufRead>(reader: R) -> impl Iterator<Item = String> {
 struct Clicks {
     last: Option<(Instant, u16, u16)>,
     n: u8,
+    /// Bucket index of the last timeline click, counted apart from list clicks.
+    timeline: Option<(Instant, usize, u8)>,
 }
 
 impl Clicks {
@@ -309,6 +311,21 @@ impl Clicks {
         self.n = if again { self.n % 3 + 1 } else { 1 };
         self.last = Some((now, col, row));
         self.n
+    }
+
+    /// Clicks on one histogram bucket, ignoring which row of the bar was hit.
+    fn timeline(&mut self, bucket: usize) -> u8 {
+        let now = Instant::now();
+        let n = match self.timeline {
+            Some((t, b, n)) if b == bucket && now.duration_since(t) < Self::WINDOW => n % 3 + 1,
+            _ => 1,
+        };
+        self.timeline = Some((now, bucket, n));
+        n
+    }
+
+    fn reset_timeline(&mut self) {
+        self.timeline = None;
     }
 }
 
@@ -380,6 +397,13 @@ fn on_key(app: &mut App, key: KeyEvent, screen: (u16, u16)) {
         app.should_quit = matches!(key.code, KeyCode::Char('y' | 'Y' | 'q' | 'Q') | KeyCode::Enter);
         return;
     }
+    if app.confirm_clear_bookmarks {
+        app.confirm_clear_bookmarks = false;
+        if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+            app.clear_bookmarks();
+        }
+        return;
+    }
     if app.show_help {
         app.show_help = false;
         return;
@@ -398,6 +422,10 @@ fn on_key(app: &mut App, key: KeyEvent, screen: (u16, u16)) {
             },
             _ => app.menu = None,
         }
+        return;
+    }
+    if key.code == KeyCode::Tab {
+        app.cycle_filter_prompt();
         return;
     }
     if app.prompt.is_some() {
@@ -420,13 +448,21 @@ fn on_key(app: &mut App, key: KeyEvent, screen: (u16, u16)) {
         KeyCode::Enter => app.enter(),
         KeyCode::Esc => app.escape(screen),
         KeyCode::Backspace => app.back(),
-        KeyCode::Tab => app.open_prompt(PromptKind::Exclude),
-        KeyCode::Char(' ') => app.open_prompt(PromptKind::Include),
-        KeyCode::Char('f' | 'F') => app.open_prompt(PromptKind::Find),
-        KeyCode::Char('t' | 'T') => app.open_prompt(PromptKind::Time),
+        KeyCode::Char('/') => app.open_prompt(PromptKind::Include),
+        KeyCode::Char('\\') => app.open_prompt(PromptKind::Exclude),
+        KeyCode::Char('f') => app.open_prompt(PromptKind::Find),
+        KeyCode::Char('F') => app.clear_find(),
+        KeyCode::Char('t') => app.open_prompt(PromptKind::Time),
+        KeyCode::Char('T') => {
+            let _ = app.set_time("");
+        }
+        KeyCode::Char('B') => app.confirm_clear_bookmarks = true,
         KeyCode::Char('g' | 'G') => app.open_prompt(PromptKind::GoTo),
-        KeyCode::Char('n') => app.find_next(true),
-        KeyCode::Char('N') => app.find_next(false),
+        KeyCode::Char('P') => app.find_next(false),
+        KeyCode::Char('N') => app.find_next(true),
+        KeyCode::Char(' ') => app.toggle_bookmark(),
+        KeyCode::Char('p') => app.bookmark_next(false),
+        KeyCode::Char('n') => app.bookmark_next(true),
         KeyCode::Char('a' | 'A') => app.toggle_all_view(),
         KeyCode::Char('c' | 'C') => {
             app.toggle_case();
@@ -434,10 +470,6 @@ fn on_key(app: &mut App, key: KeyEvent, screen: (u16, u16)) {
         }
         KeyCode::Char('l' | 'L') => {
             app.wrap ^= true;
-            app.save_prefs();
-        }
-        KeyCode::Char('p' | 'P') => {
-            app.power_scroll ^= true;
             app.save_prefs();
         }
         KeyCode::Char('s' | 'S') => {
@@ -527,7 +559,13 @@ fn on_mouse(app: &mut App, m: MouseEvent, screen: (u16, u16), clicks: &mut Click
         MouseEventKind::Up(MouseButton::Left) => {
             app.bar_drag = None;
             if let Some((a, b)) = app.drag.take() {
-                app.release_timeline(a, b);
+                if a == b {
+                    let n = clicks.timeline(a);
+                    app.release_timeline(a, b, n);
+                } else {
+                    clicks.reset_timeline();
+                    app.release_timeline(a, b, 1);
+                }
             }
             app.release();
         }
@@ -634,6 +672,38 @@ mod tests {
         let mut c = Clicks::default();
         assert_eq!([c.press(1, 1), c.press(1, 1), c.press(1, 1), c.press(1, 1)], [1, 2, 3, 1]);
         assert_eq!(c.press(2, 1), 1, "a different cell starts again");
+        assert_eq!([c.timeline(4), c.timeline(4), c.timeline(5)], [1, 2, 1]);
+        c.reset_timeline();
+        assert_eq!(c.timeline(4), 1, "a drag starts the count again");
+    }
+
+    #[test]
+    fn uppercase_f_t_and_b_clear_instead_of_opening_a_prompt() {
+        let mut app = App::new(parse::parse_lines(vec!["2026-10-16 09:00:00 [INFO] a".into()]), "test".into());
+        app.toggle_all_view();
+        app.set_find("a").unwrap();
+        app.set_time("09:00").unwrap();
+        app.toggle_bookmark();
+        let press = |app: &mut App, c| on_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), (80, 24));
+        press(&mut app, 'F');
+        assert!(app.find.is_none());
+        assert!(app.prompt.is_none());
+        press(&mut app, 'T');
+        assert!(app.time.is_none());
+        press(&mut app, 'B');
+        assert!(app.confirm_clear_bookmarks);
+        assert_eq!(app.bookmarks.len(), 1, "it asks before clearing");
+        press(&mut app, 'n');
+        assert!(!app.confirm_clear_bookmarks);
+        assert_eq!(app.bookmarks.len(), 1);
+        press(&mut app, 'B');
+        press(&mut app, 'y');
+        assert!(app.bookmarks.is_empty());
+        press(&mut app, 'f');
+        assert!(matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Find)));
+        app.prompt = None;
+        press(&mut app, 't');
+        assert!(matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Time)));
     }
 
     #[test]

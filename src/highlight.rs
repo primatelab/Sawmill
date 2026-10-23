@@ -229,6 +229,26 @@ mod tests {
     }
 
     #[test]
+    fn the_five_date_formats_are_italic() {
+        for date in [
+            "2026-10-16T09:21:29.123Z",
+            "October 16, 2026",
+            "16/Oct/2026:09:21:29",
+            "16 October 2026",
+            "16/10/2026",
+            "10-16-26",
+        ] {
+            let spans = raw(date, None, None, None, LogKind::System);
+            let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(joined, date);
+            assert!(
+                spans.iter().all(|s| s.style.add_modifier.contains(Modifier::ITALIC)),
+                "{date} -> {spans:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_named_highlight_follows_the_theme() {
         let theme = theme::by_name("dracula");
         let spans = super::raw("fn main() {", None, None, None, LogKind::System, theme);

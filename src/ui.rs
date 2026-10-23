@@ -19,6 +19,10 @@ use std::collections::VecDeque;
 
 const HIST_HEIGHT: u16 = 12;
 const LOWER_HALF: char = '\u{2584}';
+/// Before the line number on a bookmarked raw line.
+const LINE_MARK: char = '\u{25B6}';
+/// Above a histogram bucket that contains a bookmark.
+const BUCKET_MARK: char = '\u{25BF}';
 /// Sits between the count, level or line number and the text.
 const DIVIDER: &str = " \u{2502} ";
 use parse::OCTAL_NL;
@@ -292,16 +296,40 @@ fn draw_histogram(f: &mut Frame, app: &mut App, area: Rect) {
         .filter(|&t| t >= first)
         .map(|t| ((t - first).num_seconds() / secs) as usize);
     let lit = |i: usize| drag.is_some_and(|(lo, hi)| i >= lo && i <= hi) || cursor == Some(i);
-    render_bars(&buckets, inner, f.buffer_mut(), theme, lit);
+    let shown = buckets.len().min(inner.width as usize);
+    let pad = (inner.width as usize).saturating_sub(shown) / 2;
+    let x = inner.x + pad as u16;
+    let bars = Rect {
+        x,
+        y: inner.y.saturating_add(1),
+        width: shown as u16,
+        height: inner.height.saturating_sub(1),
+    };
+    render_bars(&buckets, bars, f.buffer_mut(), theme, lit);
+    paint_bucket_marks(f.buffer_mut(), app, &buckets[..shown], x, inner.y);
     app.hist_geom = Some(HistGeom {
-        x: inner.x,
+        x,
         y: inner.y,
         height: inner.height,
-        len: buckets.len().min(inner.width as usize),
+        len: shown,
         start: first,
         secs: app.bucket_secs,
     });
     draw_tooltip(f, app, &buckets, inner, theme);
+}
+
+/// A bright green `▿` on the row above each bar whose bucket holds a bookmark.
+/// A line with no carried time, or a time outside the drawn buckets, leaves no mark.
+fn paint_bucket_marks(buf: &mut Buffer, app: &App, buckets: &[Bucket], x: u16, y: u16) {
+    if app.bookmarks.is_empty() || buckets.is_empty() {
+        return;
+    }
+    let first = buckets[0].start;
+    for (i, on) in app.bookmark_buckets(first, app.bucket_secs, buckets.len()).iter().enumerate() {
+        if *on && let Some(cell) = buf.cell_mut((x + i as u16, y)) {
+            cell.set_char(BUCKET_MARK).set_fg(Color::LightGreen);
+        }
+    }
 }
 
 /// Stacked bars at two units per cell: `▄` paints the lower unit in the
@@ -489,12 +517,14 @@ fn draw_lines(f: &mut Frame, app: &mut App, area: Rect) {
     let digits = list.last().map_or(0, |&i| entries[i].line_no.to_string().len()).max(7);
     let files = &app.files;
     let name_w = files.iter().map(|s| s.chars().count()).max().unwrap_or(0).min(MAX_FILE_NAME);
-    let indent = digits + name_w + 2 * DIVIDER.chars().count();
+    // One column for the bookmark mark, then the line number.
+    let indent = 1 + digits + name_w + 2 * DIVIDER.chars().count();
     let budget = (block.inner(area).width as usize).saturating_sub(indent);
     let wide = (!wrap && budget > 0 && app.max_raw > budget).then_some((app.max_raw, hscroll, budget));
     let block = if wide.is_some() { block.padding(Padding::bottom(1)) } else { block };
     let inner = block.inner(area);
-    let cont = vec![Span::raw(" ".repeat(digits)), divider(theme), Span::raw(" ".repeat(name_w)), divider(theme)];
+    let cont = vec![Span::raw(" ".repeat(1 + digits)), divider(theme), Span::raw(" ".repeat(name_w)), divider(theme)];
+    let bookmarks = &app.bookmarks;
     let hscroll = if wrap { 0 } else { hscroll };
     let max_rows = wrap_rows(inner);
     let n = list.len();
@@ -502,7 +532,13 @@ fn draw_lines(f: &mut Frame, app: &mut App, area: Rect) {
     let drawn = render_window(theme, f, area, block, n, cursor, &mut top, |i| {
         let e = &entries[list[i]];
         let name = files.get(e.file).map_or("", String::as_str);
+        let mark = if bookmarks.contains(&(e.file, e.file_line)) {
+            Span::styled(LINE_MARK.to_string(), Style::default().fg(Color::LightGreen))
+        } else {
+            Span::raw(" ")
+        };
         let gutter = vec![
+            mark,
             Span::styled(format!("{:>digits$}", e.line_no), Style::default().fg(theme.severity(e.severity))),
             divider(theme),
             Span::styled(format!("{:<name_w$}", truncate(name, name_w)), Style::default().fg(theme.purple)),
@@ -528,9 +564,10 @@ fn draw_lines(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = theme_of(app);
-    if app.confirm_quit {
+    if app.confirm_quit || app.confirm_clear_bookmarks {
+        let label = if app.confirm_quit { " Quit " } else { " Bookmarks " };
         let spans = vec![
-            Span::styled(" Quit ", Style::default().fg(ink(theme.error_lit)).bg(theme.error_lit)),
+            Span::styled(label, Style::default().fg(ink(theme.error_lit)).bg(theme.error_lit)),
             Span::styled(" Are you sure? (y/n)", Style::default().fg(theme.bright).bold()),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -632,23 +669,27 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "pattern \u{2192} its lines \u{2192} line in context \u{2192} its pattern"),
     ("a", "all filtered lines, in file order"),
     ("Esc", "clear selection, then find, then go back; on patterns, Files, Settings, Themes or Quit"),
-    ("Backspace", "go back"),
+    ("Backspace", "previous time period, then go back"),
     ("e w i d o", "toggle Error Warn Info Debug Other; on a web log, 5xx 4xx 2xx 1xx other"),
     ("E W I D O", "show only that level; again for all"),
     ("5 4 3 2 1 0", "web log only: same toggles (3 and 2 are both 2xx/3xx; 0 is other)"),
-    ("Space / Tab", "include / exclude regex (empty clears)"),
+    ("/  \\", "include / exclude regex (empty clears)"),
+    ("Tab", "cycle Include, Exclude, Find, then back"),
     ("in a prompt", "arrows move; Home End; Ctrl-arrows by word; Ctrl-Backspace / Ctrl-Delete delete a word"),
     ("c", "case sensitivity for every regex"),
-    ("t", "time range: 15:55  15:55..15:58  15:55..+5m  Feb 15  (empty clears)"),
-    ("click / drag on timeline", "jump to that time; drag filters to those buckets"),
+    ("t  T", "time range: 15:55  15:55..15:58  15:55..+5m  Feb 15  (empty clears); T clears"),
+    ("click / drag on timeline", "drag filters; double-click takes five buckets around the click; a click in Lines or All jumps there"),
     ("right-click timeline", "clear the time filter, or choose a period"),
     ("double-click the gutter", "same as Enter"),
     ("drag / 2-click / 3-click", "select text; a word; up to whitespace"),
-    ("right click", "include, exclude or find the selection"),
-    ("f   n N", "find regex; next / previous match"),
+    ("right click", "include, exclude or find the selection; in Lines and All, bookmark the line"),
+    ("f  F   P N", "find regex; F clears; previous / next match"),
     ("g", "go to line number"),
-    ("l  p  s", "wrap the selected line (#012 breaks; otherwise it shows as \u{23ce}); power scroll; mouse off"),
-    ("%IP% %UUID% %FIND%", "macros, expand inside any regex"),
+    ("Space", "in Lines and All lines, mark or unmark the cursor line"),
+    ("p  n", "previous / next bookmark, in Lines and All lines"),
+    ("B", "clear bookmarks, after asking"),
+    ("l  s", "wrap the selected line (#012 breaks; otherwise it shows as \u{23ce}); mouse off"),
+    ("%IP4% %IP6% %DATE% %UUID% %FIND%", "macros, expand inside any regex"),
     ("q", "quit, after asking; Ctrl-C quits at once"),
 ];
 
@@ -1035,5 +1076,29 @@ mod tests {
         assert_eq!((top.fg, top.bg), (Color::Cyan, Color::Red));
         let bottom = &buf[(0, 1)];
         assert_eq!((bottom.fg, bottom.bg), (Color::Cyan, Color::Cyan));
+    }
+
+    #[test]
+    fn a_short_histogram_is_centred_and_a_bookmark_marks_its_bucket() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let lines = vec!["2026-10-16 09:00:00 [INFO] one".to_string()];
+        let mut app = App::new(parse::parse_lines(lines), "test".into());
+        app.toggle_all_view();
+        app.toggle_bookmark();
+        let mut term = Terminal::new(TestBackend::new(20, 16)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let g = app.hist_geom.expect("histogram geometry");
+        let inner_w = 18usize;
+        assert!(g.len < inner_w, "the span is shorter than the timeline");
+        assert_eq!(g.x, 1 + ((inner_w - g.len) / 2) as u16, "bars are centred");
+        assert_eq!(g.y, 1, "the geometry includes the mark row");
+        let buf = term.backend().buffer();
+        let mark = &buf[(g.x, g.y)];
+        assert_eq!(mark.symbol(), "\u{25BF}");
+        assert_eq!(mark.fg, Color::LightGreen);
+        assert_eq!(buf[(g.x, g.y + 1)].symbol(), "\u{2584}", "the bar starts on the next row");
+        assert_eq!(buf[(g.x - 1, g.y + 1)].symbol(), " ", "the padding beside the bars is empty");
     }
 }

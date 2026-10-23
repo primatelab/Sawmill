@@ -11,35 +11,37 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-pub const DEFAULT: &str = r##"# Sawmill — Dissecting Logs.
+pub const DEFAULT: &str = r##"# Sawmill - Dissecting Logs.
 # Delete a section to get the built-in default for it back.
 
-# theme is one of the built-in names (terminal, dracula, solarized, ...).
-# wrap, mouse, case_sensitive and power_scroll are the Settings menu.
-[ui]
-theme = "terminal"
-wrap = false
-mouse = true
-case_sensitive = false
-power_scroll = false
+############# MASKS ##############
 
 # Masks collapse the variable parts of a line so that similar lines group
 # into one pattern. They run in order, so put specific shapes before general
-# ones. The name is shown uppercase and struck through in place of the match.
+# ones. The name is shown struck through, as written, in place of the match.
+
 [[mask]]
 name = "UUID"
-regex = '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
+regex = '\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b'
+
+# Before IPv4, so an IPv4-mapped address is one token. A digit or a 4-digit
+# hextet keeps this off clock times and off C++ names such as std::vector.
+[[mask]]
+name = "IPv6"
+builtin = "IP6"
 
 [[mask]]
-name = "ADDR"
-regex = '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b'
+name = "IPv4"
+builtin = "IP4"
+
+# Dates before the bare-number rule, one shape each: ISO, Common Log,
+# day-month, month-day, numeric, then a bare clock time.
+[[mask]] # Built-in date-parsing regexes.
+name = "DATE"
+builtin = "DATE"
 
 [[mask]]
-name = "TS"
-regex = '\b\d{4}[-/]\d{2}[-/]\d{2}([T ]\d{2}:\d{2}:\d{2}(\.\d+)?)?\b'
-
-[[mask]]
-name = "TS"
+name = "TIME"
 regex = '\b\d{2}:\d{2}:\d{2}(\.\d+)?\b'
 
 [[mask]]
@@ -49,10 +51,6 @@ regex = '\b0x[0-9a-fA-F]+\b'
 [[mask]]
 name = "HASH"
 regex = '\b[0-9a-fA-F]{12,}\b'
-
-# [[mask]]
-# name = "PATH"
-# regex = '/[A-Za-z0-9_.\-/]{2,}'
 
 [[mask]]
 name = "STR"
@@ -67,17 +65,22 @@ regex = "'[^']*'"
 name = "NUM"
 regex = '\b\d+(\.\d+)?'
 
-# Macros expand inside any regex you type: %IP%, %UUID%. %FIND% is built in
-# and stands for the current find term.
-[macros]
-IP = '\b\d{1,3}(?:\.\d{1,3}){3}\b'
-UUID = '\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b'
+################# MACROS ##################
 
-# Highlight rules colour raw lines and pattern text. A mask name is drawn
-# struck through, over the top of these rules. Later rules paint over earlier ones.
+# Macros expand inside any regex you type:
+# %IP4%, %IP6% and %DATE% are builtins.
+# %FIND% is a special builtin and stands in for the current find term.
+
+[macros]
+UUID = '\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b'
+OBJECT = '\b[A-Za-z0-9_-]+(::[A-Za-z0-9_-]+)+'
+
+################## HIGHLIGHTS #############
+
+# Highlight rules colour raw lines. Later rules paint over earlier ones.
 # fg and bg take a colour name (red, lightred, darkgray, ...), "#rrggbb" or a
-# 256-colour index. A name follows the current theme; a hex colour or an index
-# stays as written. bold, italic, dim and underline are true or false.
+# 256-colour index. bold, italic, dim and underline are true or false.
+
 [[highlight]] # Braces
 regex = '[{}]'
 fg = "green"
@@ -91,17 +94,12 @@ regex = '\b[A-Za-z0-9_-]+(::[A-Za-z0-9_-]+)+'
 fg = "cyan"
 
 [[highlight]] # Paths
-regex = '~*/[A-Za-z_./]*/[A-Za-z0-9_./-]*'
+regex = '[~.]?/[A-Za-z_./]*/[A-Za-z0-9_./-]*'
 fg = "yellow"
 dim = true
 
-[[highlight]] # Date
-regex = '\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +[0-9]{1,2}\b'
-fg = "white"
-italic = true
-
-[[highlight]] # Date
-regex = '\b20[0-9]{2}[/-][01][0-9][/-][0-3][0-9]\b'
+[[highlight]] # Built-in date-parsing regexes.
+builtin = "DATE"
 fg = "white"
 italic = true
 
@@ -111,13 +109,27 @@ fg = "white"
 italic = true
 
 [[highlight]] # IPv4 Address
-regex = '[0-9]{1,3}(?:\.[0-9]{1,3}){3}\b'
+builtin = "IP4"
+fg = "lightred"
+bold = true
+
+[[highlight]] # IPv6 Address
+builtin = "IP6"
 fg = "lightred"
 bold = true
 
 [[highlight]] # UUID
 regex = '\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b'
 fg = "cyan"
+
+################# UI SETTINGS ###############
+
+[ui]
+theme = "terminal"
+wrap = false
+mouse = true
+case_sensitive = false
+power_scroll = false
 "##;
 
 #[derive(Deserialize)]
@@ -133,13 +145,15 @@ struct File {
 #[serde(deny_unknown_fields)]
 struct MaskSpec {
     name: String,
-    regex: String,
+    regex: Option<String>,
+    builtin: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HighlightSpec {
-    regex: String,
+    regex: Option<String>,
+    builtin: Option<String>,
     fg: Option<String>,
     bg: Option<String>,
     #[serde(default)]
@@ -275,6 +289,61 @@ fn regex(src: &str) -> Result<Regex, String> {
     Regex::new(src).map_err(|e| format!("bad regex {src:?}: {}", e.to_string().lines().last().unwrap_or_default().trim()))
 }
 
+/// IPv4 and an optional port. No leading word boundary.
+const IP4: &str = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b";
+
+/// IPv6, including compressed and IPv4-mapped forms. A digit or a 4-digit
+/// hextet keeps this off clock times and off `std::vector`.
+const IP6: &str = r"(?i)(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|::(?:ffff:)?(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-f]{1,4}:){1,6}(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]*\d[0-9a-f]*::[0-9a-f:]*(?::[0-9a-f]{0,4})*|::[0-9a-f:]*\d[0-9a-f:]*(?::[0-9a-f]{0,4})*|(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{4}::[0-9a-f]{0,4}(?::[0-9a-f]{0,4})*|::[0-9a-f]{4}";
+
+const BUILTIN_MACROS: [&str; 3] = ["IP4", "IP6", "DATE"];
+
+/// `DATE` is the five date shapes, in the order a mask should try them.
+/// ISO comes first so `2026-10-16` is not also read as a numeric date.
+/// `IP4` and `IP6` are one pattern each.
+fn builtin_regexes(name: &str) -> Result<Vec<String>, String> {
+    match name.to_ascii_uppercase().as_str() {
+        "DATE" => {
+            let month = "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";
+            Ok(vec![
+                r"\b\d{4}[-/]\d{2}[-/]\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?\b".into(),
+                format!(r"\b\d{{2}}/(?:{month})/\d{{4}}:\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?(?:\s*[+-]\d{{4}})?\b"),
+                format!(r"\b\d{{1,2}}\s+(?:{month})\s+\d{{4}}(?:[ T]\d{{2}}:\d{{2}}:\d{{2}})?\b"),
+                format!(r"\b(?:{month})\s+\d{{1,2}},?(?:\s+\d{{4}})?(?:\s+\d{{2}}:\d{{2}}:\d{{2}})?\b"),
+                r"\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}(?:[ T]\d{2}:\d{2}:\d{2})?\b".into(),
+            ])
+        }
+        "IP4" => Ok(vec![IP4.to_string()]),
+        "IP6" => Ok(vec![IP6.to_string()]),
+        _ => Err(format!("unknown builtin {name:?}")),
+    }
+}
+
+/// One atom, so a builtin can sit inside a larger regex. Several shapes
+/// become one alternation. A macro of the same name in the file wins.
+fn add_builtin_macros(macros: &mut Vec<(String, String)>) -> Result<(), String> {
+    for name in BUILTIN_MACROS {
+        let key = format!("%{name}%");
+        if macros.iter().any(|(n, _)| n.eq_ignore_ascii_case(&key)) {
+            continue;
+        }
+        let src = format!("(?:{})", builtin_regexes(name)?.join("|"));
+        regex(&src)?;
+        macros.push((key, src));
+    }
+    Ok(())
+}
+
+/// One written rule, or the patterns a builtin stands for. A rule is one or the other.
+fn sources(regex: Option<&str>, builtin: Option<&str>, what: &str) -> Result<Vec<String>, String> {
+    match (regex, builtin) {
+        (Some(re), None) => Ok(vec![re.to_string()]),
+        (None, Some(name)) => builtin_regexes(name),
+        (Some(_), Some(_)) => Err(format!("{what}: give a regex or a builtin, not both")),
+        (None, None) => Err(format!("{what}: needs a regex or a builtin")),
+    }
+}
+
 fn colour(name: &str) -> Result<Color, String> {
     Color::from_str(name).map_err(|_| format!("unknown colour {name:?}"))
 }
@@ -284,16 +353,20 @@ pub fn parse(text: &str) -> Result<Config, String> {
     let default = || toml::from_str::<File>(DEFAULT).expect("built-in config parses");
 
     let masks = file.mask.unwrap_or_else(|| default().mask.unwrap_or_default());
-    let masks = masks
-        .into_iter()
-        .map(|m| Ok(Mask { name: m.name.to_uppercase(), re: regex(&m.regex)? }))
-        .collect::<Result<Vec<_>, String>>()?;
+    let mut out = Vec::new();
+    for m in masks {
+        let name = m.name;
+        for src in sources(m.regex.as_deref(), m.builtin.as_deref(), &format!("mask {name}"))? {
+            out.push(Mask { name: name.clone(), re: regex(&src)? });
+        }
+    }
+    let masks = out;
     if masks.len() > MAX_MASKS {
         return Err(format!("at most {MAX_MASKS} masks"));
     }
 
     let macros = file.macros.unwrap_or_else(|| default().macros.unwrap_or_default());
-    let macros = macros
+    let mut macros = macros
         .into_iter()
         .map(|(name, v)| {
             let src = v.as_str().ok_or_else(|| format!("macro {name} must be a string"))?;
@@ -301,6 +374,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             Ok((format!("%{name}%"), src.to_string()))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    add_builtin_macros(&mut macros)?;
 
     let highlight = file.highlight.unwrap_or_else(|| default().highlight.unwrap_or_default());
     let highlight = highlight
@@ -323,9 +397,15 @@ pub fn parse(text: &str) -> Result<Config, String> {
                     mods = mods.union(m);
                 }
             }
-            Ok(Highlight { re: regex(&h.regex)?, fg: h.fg, bg: h.bg, mods })
+            let srcs = sources(h.regex.as_deref(), h.builtin.as_deref(), "highlight rule")?;
+            srcs.into_iter()
+                .map(|src| Ok(Highlight { re: regex(&src)?, fg: h.fg.clone(), bg: h.bg.clone(), mods }))
+                .collect::<Result<Vec<_>, _>>()
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     let ui = file.ui.map_or_else(Ui::default, |u| Ui {
         theme: u.theme,
@@ -404,7 +484,7 @@ pub fn save_ui(ui: &Ui) {
 }
 
 /// Placeholders are private-use characters, one per mask, so that a masked
-/// `ADDR` and the literal word `ADDR` in a log never group together.
+/// `IPv4` and the literal word `IPv4` in a log never group together.
 const PLACEHOLDER_BASE: u32 = 0xE000;
 const MAX_MASKS: usize = 0x1000;
 
@@ -427,7 +507,17 @@ mod tests {
         let c = parse(DEFAULT).unwrap();
         assert_eq!(c.masks.last().unwrap().name, "NUM");
         assert!(c.masks.iter().all(|m| m.name != "PATH"));
+        assert_eq!(c.masks.iter().filter(|m| m.name == "DATE").count(), 5);
+        assert!(c.masks.iter().any(|m| m.name == "DATE" && m.re.as_str().contains(r"\d{1,2}[-/]\d{1,2}")));
+        assert!(c.masks.iter().any(|m| m.name == "TIME"));
+        assert!(c.highlight.iter().any(|h| h.re.as_str().contains("ober")));
+        assert!(c.masks.iter().any(|m| m.name == "IPv4" && m.re.as_str() == IP4));
+        assert!(c.masks.iter().any(|m| m.name == "IPv6" && m.re.as_str() == IP6));
         assert!(c.macros.iter().any(|(n, _)| n == "%UUID%"));
+        assert!(c.macros.iter().any(|(n, s)| n == "%OBJECT%" && s.contains("::")));
+        assert!(c.macros.iter().any(|(n, s)| n == "%IP4%" && s.starts_with("(?:") && s.contains(r"\d{1,3}")));
+        assert!(c.macros.iter().any(|(n, s)| n == "%IP6%" && s.starts_with("(?:")));
+        assert!(c.macros.iter().any(|(n, s)| n == "%DATE%" && s.starts_with("(?:")));
         assert_eq!(c.highlight[0].fg.as_deref(), Some("green"));
         assert!(c.highlight.iter().any(|h| h.re.as_str().contains("::") && h.fg.as_deref() == Some("cyan")));
         assert_eq!(c.ui.theme, "terminal");
@@ -438,7 +528,11 @@ mod tests {
     #[test]
     fn a_missing_section_falls_back_to_the_default() {
         let c = parse("[macros]\nHOST = 'web\\d+'\n").unwrap();
-        assert_eq!(c.macros, [("%HOST%".to_string(), r"web\d+".to_string())]);
+        assert!(c.macros.iter().any(|(n, s)| n == "%HOST%" && s == r"web\d+"));
+        assert!(!c.macros.iter().any(|(n, _)| n == "%UUID%"), "a present section replaces the default macros");
+        for name in ["%IP4%", "%IP6%", "%DATE%"] {
+            assert!(c.macros.iter().any(|(n, _)| n == name), "{name} is a builtin macro");
+        }
         assert_eq!(c.masks.len(), parse(DEFAULT).unwrap().masks.len());
         assert_eq!(c.ui.theme, "terminal");
         let partial = parse("[ui]\ntheme = 'dracula'\n").unwrap();
@@ -470,8 +564,55 @@ mod tests {
     }
 
     #[test]
-    fn mask_names_are_uppercased() {
-        let c = parse("[[mask]]\nname = 'pid'\nregex = '\\d+'\n").unwrap();
-        assert_eq!(c.masks[0].name, "PID");
+    fn mask_names_are_kept_as_written() {
+        let c = parse("[[mask]]\nname = 'hostname=HOSTNAME-'\nregex = 'x'\n").unwrap();
+        assert_eq!(c.masks[0].name, "hostname=HOSTNAME-");
+    }
+
+    #[test]
+    fn a_date_builtin_expands_to_the_five_shapes() {
+        let c = parse("[[mask]]\nname = 'date'\nbuiltin = 'DATE'\n[[highlight]]\nbuiltin = 'date'\nfg = 'white'\nitalic = true\n").unwrap();
+        assert_eq!(c.masks.len(), 5);
+        assert!(c.masks.iter().all(|m| m.name == "date"));
+        assert_eq!(c.highlight.len(), 5);
+        let painted: Vec<_> = c.highlight.iter().map(|h| h.re.as_str()).collect();
+        let masked: Vec<_> = c.masks.iter().map(|m| m.re.as_str()).collect();
+        assert_eq!(painted, masked);
+        assert!(c.highlight.iter().all(|h| h.mods.contains(Modifier::ITALIC) && h.fg.as_deref() == Some("white")));
+        let err = |text: &str| parse(text).err().unwrap_or_default();
+        assert!(err("[[mask]]\nname = 'x'\n").contains("regex or a builtin"));
+        assert!(err("[[mask]]\nname = 'x'\nregex = 'a'\nbuiltin = 'DATE'\n").contains("not both"));
+        assert!(err("[[highlight]]\nbuiltin = 'NOPE'\n").contains("NOPE"));
+    }
+
+    #[test]
+    fn ip_builtins_expand_and_are_macros() {
+        let c = parse("[[mask]]\nname = 'v4'\nbuiltin = 'ip4'\n[[mask]]\nname = 'v6'\nbuiltin = 'IP6'\n[[highlight]]\nbuiltin = 'IP4'\nfg = 'red'\n").unwrap();
+        assert_eq!(c.masks.len(), 2);
+        assert_eq!(c.masks[0].re.as_str(), IP4);
+        assert_eq!(c.masks[1].re.as_str(), IP6);
+        assert_eq!(c.highlight[0].re.as_str(), IP4);
+        let macro_of = |name: &str| c.macros.iter().find(|(n, _)| n == name).unwrap().1.as_str();
+        let ip4 = Regex::new(macro_of("%IP4%")).unwrap();
+        assert!(ip4.is_match("10.0.0.1"));
+        assert!(ip4.is_match("10.0.0.1:22"));
+        let ip6 = Regex::new(macro_of("%IP6%")).unwrap();
+        assert!(ip6.is_match("2001:db8::1"));
+        assert!(ip6.is_match("::ffff:192.0.2.1"));
+        assert!(!ip6.is_match("12:34:56"));
+        assert!(!ip6.is_match("std::vector"));
+        let date = Regex::new(macro_of("%DATE%")).unwrap();
+        assert!(date.is_match("2026-10-16"));
+        assert!(date.is_match("16/Oct/2026:09:21:29"));
+        assert!(date.is_match("Oct 16 09:21:29"));
+    }
+
+    #[test]
+    fn a_written_macro_hides_the_builtin_of_the_same_name() {
+        let c = parse("[macros]\nip4 = 'custom'\n").unwrap();
+        let found: Vec<_> = c.macros.iter().filter(|(n, _)| n.eq_ignore_ascii_case("%ip4%")).map(|(_, s)| s.as_str()).collect();
+        assert_eq!(found, ["custom"]);
+        assert!(c.macros.iter().any(|(n, _)| n == "%IP6%"));
+        assert!(c.macros.iter().any(|(n, _)| n == "%DATE%"));
     }
 }

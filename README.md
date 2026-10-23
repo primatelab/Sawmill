@@ -10,13 +10,13 @@ Press `?` inside the app for the key list.
 
 ## Views
 
-**Timeline.** A stacked severity histogram. Bucket width snaps from one second up to a day so the whole span fits the terminal. Hover a bucket for its time span and line count. Click to jump; drag to filter to that range.
+**Timeline.** A stacked severity histogram. Bucket width snaps from one second up to two days so the whole span fits the terminal. The bars are centred when they do not fill the width. Hover a bucket for its time span and line count. Drag to filter to that range. Double-click to keep the five buckets around the click. In Lines and All lines, a click jumps to that time. A bucket that contains a bookmark has a bright green mark above the bar.
 
 **Patterns.** Each line is collapsed to a shape: UUIDs, addresses, paths, hex, quoted strings and numbers become placeholders. Identical shapes are ranked by how often they appear. A group is labelled by its most common severity, so one stray error does not paint a quiet pattern red.
 
 **Lines.** `Enter` on a pattern shows the raw lines in that group. `Enter` again opens that line in the filtered stream, and once more returns to its pattern.
 
-**All lines.** `a` lists every line that passes the current filters, in file order.
+**All lines.** `a` lists every line that passes the current filters, in file order. In Lines and All lines, a bookmarked line has a bright green mark before its line number.
 
 ## Filters
 
@@ -25,13 +25,17 @@ Press `?` inside the app for the key list.
 | `e` `w` `i` `d` `o` | Toggle Error, Warn, Info, Debug, Other |
 | `E` `W` `I` `D` `O` | Show only that level; press again for all |
 | `5` `4` `3` `2` `1` `0` | On an access log, the same toggles by HTTP status |
-| `Space` / `Tab` | Include / exclude regex (empty clears it) |
+| `/` `\` | Include / exclude regex (empty clears it) |
+| `Tab` | Cycle Include, Exclude, Find, then close |
 | `c` | Case sensitivity. Regexes are case-insensitive by default |
-| `t` | Time range. `15:55`, `15:55..15:58`, `15:55..+5m`, `Feb 15`. Empty clears it |
-| `f` `n` `N` | Find a regex, then next / previous hit |
+| `t` `T` | Time range. `15:55`, `15:55..15:58`, `15:55..+5m`, `Feb 15`. Empty clears it. `T` clears it. Backspace steps back through mouse zooms |
+| `f` `F` `P` `N` | Find a regex, then previous / next hit. `F` clears the find |
 | `g` | Go to a line number |
+| `Space` | Mark or unmark the cursor line, in Lines and All lines |
+| `p` `n` | Previous / next bookmark |
+| `B` | Clear bookmarks, after asking |
 
-`%IP%`, `%UUID%` and any other macro from the config expand inside a regex, as does `%FIND%`. A line with no timestamp of its own stays with the record before it, so a traceback is filtered with its parent. The histogram still counts only lines that carry a timestamp.
+`%IP4%`, `%IP6%`, `%DATE%`, `%UUID%` and any other macro from the config expand inside a regex, as does `%FIND%`. `%IP4%`, `%IP6%` and `%DATE%` are the same patterns as the builtins. A line with no timestamp of its own stays with the record before it, so a traceback is filtered with its parent. The histogram still counts only lines that carry a timestamp.
 
 ## Menus
 
@@ -60,7 +64,7 @@ Overlapping time spans are merged by timestamp. Files that do not overlap are la
 
 | Section | Role |
 |---|---|
-| `[[mask]]` | Regexes that collapse the variable parts of a line. They run in order. The name is shown struck through, in capitals |
+| `[[mask]]` | Regexes that collapse the variable parts of a line. They run in order. The name is shown struck through, as written |
 | `[macros]` | `NAME = 'regex'` becomes `%NAME%` inside any regex |
 | `[[highlight]]` | Colour rules for the text. A colour name follows the theme; `#rrggbb` and a 256-colour index stay as written |
 | `[ui]` | Theme, wrap, mouse, case sensitivity, power scroll |

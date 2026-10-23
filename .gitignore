@@ -12,6 +12,7 @@
 .env
 .env.*
 notes.md
+config.toml
 
 # OS cruft
 .DS_Store

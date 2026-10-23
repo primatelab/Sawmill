@@ -48,11 +48,11 @@ Triage route:
 7) lines (offset/around_line/at_time) to inspect windows after filtering.
 8) close_logs when done to free memory.
 
-Patterns are lines collapsed to a shape: variable parts (numbers, addresses, UUIDs, paths, quoted strings) are replaced by uppercase mask names such as NUM and ADDR, so lines that differ only by an id group together. overview lists the masks in effect. A group is labelled by the severity most of its lines carry, not by its worst line, so one stray error does not mark hundreds of benign lines.
+Patterns are lines collapsed to a shape: variable parts (numbers, addresses, UUIDs, paths, quoted strings) are replaced by mask names as written in the config, such as NUM, IPv4 and IPv6, so lines that differ only by an id group together. overview lists the masks in effect. A group is labelled by the severity most of its lines carry, not by its worst line, so one stray error does not mark hundreds of benign lines.
 
 Use MCP-first triage: start with these tools, not ad-hoc text parsing, unless you need a query this server cannot express. Results are paged: ask for a small limit and follow next_offset. Filters are session state and every read reflects them, so call overview whenever a count surprises you.
 
-Regexes are case-insensitive unless you set case_sensitive, and %IP%, %UUID% and any macro from the config file expand inside them. Timestamps are only read near the start of a line, so dates inside payloads are ignored; a line with no timestamp of its own inherits the one before it, which keeps tracebacks with their record.
+Regexes are case-insensitive unless you set case_sensitive, and %IP4%, %IP6%, %DATE%, %UUID% and any macro from the config file expand inside them. Timestamps are only read near the start of a line, so dates inside payloads are ignored; a line with no timestamp of its own inherits the one before it, which keeps tracebacks with their record.
 
 An access log is detected on its own. When quoted requests followed by a status outnumber syslog level tokens, lines are classed 5xx, 4xx, 2xx (3xx included), 1xx or OTHER instead of ERROR, WARN, INFO, DEBUG and OTHER. overview's kind field says \"web\" or \"system\". set_filters accepts either set of names.";
 
@@ -945,7 +945,7 @@ mod tests {
         assert!(out["masks"].as_array().unwrap().iter().any(|m| m == "NUM"));
         let top = out["patterns"]["top"].as_array().unwrap();
         assert_eq!(top[0]["count"], 2, "the two starting lines share a shape");
-        assert_eq!(top[0]["text"], "TS INFO starting run NUM for host STR");
+        assert_eq!(top[0]["text"], "DATE INFO starting run NUM for host STR");
     }
 
     #[test]
@@ -986,10 +986,10 @@ mod tests {
         assert_eq!(matching(&mut server, json!({})), 6, "no fields clears everything");
         assert_eq!(matching(&mut server, json!({ "levels": ["5xx"] })), 1, "5xx is ERROR in either kind");
         assert_eq!(matching(&mut server, json!({})), 6);
-        let out = server.json("set_filters", json!({ "exclude": "%IP%" }));
+        let out = server.json("set_filters", json!({ "exclude": "%IP4%" }));
         let _ = std::fs::remove_file(&path);
         assert_eq!(out["lines"]["matching"], 4, "macros expand in a filter");
-        assert_eq!(out["filters"]["exclude"], "%IP%", "the source is reported, not the expansion");
+        assert_eq!(out["filters"]["exclude"], "%IP4%", "the source is reported, not the expansion");
     }
 
     #[test]

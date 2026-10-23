@@ -85,11 +85,16 @@ struct Patterns {
     severity: Regex,
     http: Regex,
     iso: Regex,
-    syslog: Regex,
     clf: Regex,
+    day_month: Regex,
+    syslog: Regex,
+    numeric: Regex,
     bare_time: Regex,
     space: Regex,
 }
+
+/// English month, short or full: `Oct` and `October`, including `Sept`.
+const MONTHS: &str = "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";
 
 fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
@@ -107,19 +112,30 @@ fn patterns() -> &'static Patterns {
             r#""(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE) [^"]*"\s+([1-5]\d{2})\b"#,
         )
         .unwrap(),
-        // 2026-10-16T09:21:29 or 2026/10/16 09:21:29
+        // 2026-10-16, 2026-10-16T09:21:29.123Z, 2026/10/16 09:21:29+00:00.
+        // The offset is not captured: the clock time is kept as written.
         iso: Regex::new(
-            r"(\d{4})[-/](\d{2})[-/](\d{2})[T ](\d{2}):(\d{2}):(\d{2})",
+            r"(\d{4})[-/](\d{2})[-/](\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?",
         )
         .unwrap(),
-        // Oct 16 09:21:29
-        syslog: Regex::new(
-            r"(?i)\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})",
-        )
+        // [16/Oct/2026:09:21:29 or 16/October/2026:09:21:29
+        clf: Regex::new(&format!(
+            r"(?i)(\d{{2}})/({MONTHS})/(\d{{4}}):(\d{{2}}):(\d{{2}}):(\d{{2}})",
+        ))
         .unwrap(),
-        // [16/Oct/2026:09:21:29
-        clf: Regex::new(
-            r"(?i)(\d{2})/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/(\d{4}):(\d{2}):(\d{2}):(\d{2})",
+        // 16 October 2026, optionally with a clock time.
+        day_month: Regex::new(&format!(
+            r"(?i)\b(\d{{1,2}})\s+({MONTHS})\s+(\d{{4}})(?:[ T](\d{{2}}):(\d{{2}}):(\d{{2}}))?",
+        ))
+        .unwrap(),
+        // Oct 16 09:21:29, October 16, 2026, Oct 16 2026 09:21:29.
+        syslog: Regex::new(&format!(
+            r"(?i)\b({MONTHS})\s+(\d{{1,2}}),?(?:\s+(\d{{4}}))?(?:\s+(\d{{2}}):(\d{{2}}):(\d{{2}}))?",
+        ))
+        .unwrap(),
+        // 16/10/2026 or 10-16-26. A word boundary keeps this off the tail of an ISO date.
+        numeric: Regex::new(
+            r"\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})(?:[ T](\d{2}):(\d{2}):(\d{2}))?\b",
         )
         .unwrap(),
         bare_time: Regex::new(r"\b(\d{2}):(\d{2}):(\d{2})\b").unwrap(),
@@ -128,7 +144,7 @@ fn patterns() -> &'static Patterns {
 }
 
 fn month_num(m: &str) -> u32 {
-    match m.to_ascii_lowercase().as_str() {
+    match m.get(..3).unwrap_or(m).to_ascii_lowercase().as_str() {
         "jan" => 1,
         "feb" => 2,
         "mar" => 3,
@@ -140,8 +156,40 @@ fn month_num(m: &str) -> u32 {
         "sep" => 9,
         "oct" => 10,
         "nov" => 11,
-        _ => 12,
+        "dec" => 12,
+        _ => 0,
     }
+}
+
+/// A date with no clock is midnight. Fractional seconds are dropped.
+fn clock(date: NaiveDate, c: &regex::Captures, hour: usize) -> Option<NaiveDateTime> {
+    match c.get(hour) {
+        Some(_) => date.and_hms_opt(num(c, hour)?, num(c, hour + 1)?, num(c, hour + 2)?),
+        None => date.and_hms_opt(0, 0, 0),
+    }
+}
+
+/// `16/10/2026` is day-first. `10-16-26` is month-first, because 16 cannot be a
+/// month. When both numbers could be a month, the date is day-first. A two-digit
+/// year pivots at 70, so `26` is 2026 and `99` is 1999.
+fn numeric_ymd(first: u32, second: u32, year: i32) -> Option<(i32, u32, u32)> {
+    let year = if year >= 100 {
+        year
+    } else if year >= 70 {
+        1900 + year
+    } else {
+        2000 + year
+    };
+    let (month, day) = if first > 12 && second <= 12 {
+        (second, first)
+    } else if second > 12 && first <= 12 {
+        (first, second)
+    } else if first <= 12 && second <= 12 {
+        (second, first)
+    } else {
+        return None;
+    };
+    Some((year, month, day))
 }
 
 /// A log line's own timestamp sits at the start. Dates further in belong to the
@@ -172,16 +220,24 @@ pub fn parse_timestamp(line: &str, fallback_year: i32) -> Option<NaiveDateTime> 
     let h = head(line);
 
     if let Some(c) = near_start(&p.iso, h, STAMP_OFFSET) {
-        return NaiveDate::from_ymd_opt(num(&c, 1)?, num(&c, 2)?, num(&c, 3)?)?
-            .and_hms_opt(num(&c, 4)?, num(&c, 5)?, num(&c, 6)?);
+        return clock(NaiveDate::from_ymd_opt(num(&c, 1)?, num(&c, 2)?, num(&c, 3)?)?, &c, 4);
     }
     if let Some(c) = near_start(&p.clf, h, CLF_OFFSET) {
-        return NaiveDate::from_ymd_opt(num(&c, 3)?, month_num(&c[2]), num(&c, 1)?)?
-            .and_hms_opt(num(&c, 4)?, num(&c, 5)?, num(&c, 6)?);
+        return clock(NaiveDate::from_ymd_opt(num(&c, 3)?, month_num(&c[2]), num(&c, 1)?)?, &c, 4);
+    }
+    if let Some(c) = near_start(&p.day_month, h, STAMP_OFFSET) {
+        return clock(NaiveDate::from_ymd_opt(num(&c, 3)?, month_num(&c[2]), num(&c, 1)?)?, &c, 4);
     }
     if let Some(c) = near_start(&p.syslog, h, STAMP_OFFSET) {
-        return NaiveDate::from_ymd_opt(fallback_year, month_num(&c[1]), num(&c, 2)?)?
-            .and_hms_opt(num(&c, 3)?, num(&c, 4)?, num(&c, 5)?);
+        let year = match c.get(3) {
+            Some(_) => num(&c, 3)?,
+            None => fallback_year,
+        };
+        return clock(NaiveDate::from_ymd_opt(year, month_num(&c[1]), num(&c, 2)?)?, &c, 4);
+    }
+    if let Some(c) = near_start(&p.numeric, h, STAMP_OFFSET) {
+        let (y, m, d) = numeric_ymd(num(&c, 1)?, num(&c, 2)?, num(&c, 3)?)?;
+        return clock(NaiveDate::from_ymd_opt(y, m, d)?, &c, 4);
     }
     if let Some(c) = near_start(&p.bare_time, h, STAMP_OFFSET) {
         let t = NaiveTime::from_hms_opt(num(&c, 1)?, num(&c, 2)?, num(&c, 3)?)?;
@@ -610,6 +666,46 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_five_date_formats() {
+        let at = |line| parse_timestamp(line, 1999).unwrap().to_string();
+        assert_eq!(at("2026-10-16 started"), "2026-10-16 00:00:00");
+        assert_eq!(at("2026-10-16T09:21:29.123Z up"), "2026-10-16 09:21:29");
+        assert_eq!(at("2026/10/16 09:21:29+00:00 up"), "2026-10-16 09:21:29");
+        assert_eq!(at("Oct 16 09:21:29 host"), "1999-10-16 09:21:29");
+        assert_eq!(at("October 16, 2026 hello"), "2026-10-16 00:00:00");
+        assert_eq!(at("October 16, 2026 09:21:29 ready"), "2026-10-16 09:21:29");
+        assert_eq!(at(r#"1.2.3.4 - - [16/October/2026:09:21:29 +0000] "GET /""#), "2026-10-16 09:21:29");
+        assert_eq!(at("16 October 2026 ready"), "2026-10-16 00:00:00");
+        assert_eq!(at("16 October 2026 09:21:29 ready"), "2026-10-16 09:21:29");
+        assert_eq!(at("16/10/2026 ready"), "2026-10-16 00:00:00");
+        assert_eq!(at("16/10/2026 09:21:29 ready"), "2026-10-16 09:21:29");
+        assert_eq!(at("10-16-26 ready"), "2026-10-16 00:00:00");
+        assert_eq!(at("05/06/2026 ready"), "2026-06-05 00:00:00");
+        assert_eq!(at("10-16-99 ready"), "1999-10-16 00:00:00");
+    }
+
+    #[test]
+    fn rejects_a_numeric_date_that_cannot_be_a_day() {
+        assert!(parse_timestamp("32/13/2026 no", 2026).is_none());
+        assert!(parse_timestamp("Maybe 16 cats", 2026).is_none());
+        assert!(parse_timestamp("code 16/10/2026 failed", 2026).is_none());
+    }
+
+    #[test]
+    fn the_five_date_formats_collapse_to_one_shape() {
+        let lines = [
+            "2026-10-16T09:21:29.123Z up",
+            "October 16, 2026 up",
+            "16/Oct/2026:09:21:29 up",
+            "16 October 2026 up",
+            "16/10/2026 up",
+            "10-16-26 up",
+        ];
+        let shapes: Vec<_> = lines.iter().map(|l| display_pattern(&normalise(l)).0).collect();
+        assert_eq!(shapes, vec!["DATE up"; lines.len()]);
+    }
+
+    #[test]
     fn classifies_severity() {
         assert_eq!(parse_severity("a [ERROR] b"), Severity::Error);
         assert_eq!(parse_severity("a WARNING b"), Severity::Warn);
@@ -825,8 +921,21 @@ mod tests {
 
     #[test]
     fn a_masked_value_never_groups_with_the_literal_mask_name() {
-        assert_ne!(normalise("from 10.0.0.1"), normalise("from ADDR"));
-        assert_eq!(display_pattern(&normalise("from 10.0.0.1:22")).0, "from ADDR");
+        assert_ne!(normalise("from 10.0.0.1"), normalise("from IPv4"));
+        assert_eq!(display_pattern(&normalise("from 10.0.0.1:22")).0, "from IPv4");
+    }
+
+    #[test]
+    fn ipv6_addresses_collapse_and_clocks_and_scopes_do_not() {
+        let shown = |line| display_pattern(&normalise(line)).0;
+        assert_eq!(shown("from 2001:db8::1 ok"), "from IPv6 ok");
+        assert_eq!(shown("from ::ffff:192.0.2.1 ok"), "from IPv6 ok");
+        assert_eq!(shown("from fe80:: ok"), "from IPv6 ok");
+        assert_eq!(shown("from ::1 ok"), "from IPv6 ok");
+        assert_eq!(shown("from 2001:0db8:85a3:0000:0000:8a2e:0370:7334 ok"), "from IPv6 ok");
+        assert_eq!(shown("at 12:34:56 ok"), "at TIME ok");
+        assert_eq!(shown("std::vector"), "std::vector");
+        assert_eq!(shown("from 10.0.0.1 ok"), "from IPv4 ok");
     }
 
     #[test]

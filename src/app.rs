@@ -3,12 +3,12 @@ use crate::parse::{self, Entry, FileLog, LogKind, Severity};
 use crate::theme;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 use regex::{NoExpand, Regex, RegexBuilder};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Bucket widths the histogram is allowed to snap to, smallest first.
-const LADDER_SECS: [i64; 12] = [
-    1, 5, 15, 30, 60, 300, 900, 1800, 3600, 21600, 43200, 86400,
+const LADDER_SECS: [i64; 15] = [
+    1, 5, 15, 30, 60, 120, 300, 900, 1800, 3600, 10800, 21600, 43200, 86400, 172800,
 ];
 
 /// The severity a group is mostly made of. Labelling by the single most severe
@@ -280,6 +280,8 @@ pub enum MenuAction {
     /// Index into `theme::NAMES`.
     SetTheme(u8),
     Quit,
+    /// `(file index, file line)` of the row under the pointer.
+    Bookmark(usize, usize),
     /// Shown in a menu and never chosen. The files menu uses this for stdin.
     Inert,
 }
@@ -403,9 +405,17 @@ pub struct App {
     pub include: Option<Query>,
     pub exclude: Option<Query>,
     pub find: Option<Query>,
+    /// `(file index, file line)`. Session only; not written to the config.
+    pub bookmarks: HashSet<(usize, usize)>,
+    /// Entry index for each bookmark key. Rebuilt when logs change so drawing
+    /// bookmark marks never needs to walk every loaded entry.
+    bookmark_entries: HashMap<(usize, usize), usize>,
     pub case_sensitive: bool,
     /// `[from, to)`.
     pub time: Option<(NaiveDateTime, NaiveDateTime)>,
+    /// Earlier time filters from drags and double-clicks. `None` is no filter.
+    /// Typing a range or clearing the filter empties it.
+    time_stack: Vec<Option<(NaiveDateTime, NaiveDateTime)>>,
     /// Entries that pass every filter, in file order.
     pub visible: Vec<usize>,
     pub patterns: Vec<Pattern>,
@@ -449,6 +459,8 @@ pub struct App {
     pub message: Option<String>,
     pub show_help: bool,
     pub confirm_quit: bool,
+    /// `B` is waiting for y/n before the bookmarks go.
+    pub confirm_clear_bookmarks: bool,
     pub should_quit: bool,
     generation: u64,
     find_generation: u64,
@@ -463,6 +475,7 @@ impl App {
     pub fn new(entries: Vec<Entry>, source: String) -> Self {
         let when = parse::carry_forward(&entries);
         let first_day = entries.iter().find_map(|e| e.ts).map(|t| t.date());
+        let bookmark_entries = entries.iter().enumerate().map(|(i, e)| ((e.file, e.file_line), i)).collect();
         let prefs = config::ui();
         let mut app = App {
             entries,
@@ -477,8 +490,11 @@ impl App {
             include: None,
             exclude: None,
             find: None,
+            bookmarks: HashSet::new(),
+            bookmark_entries,
             case_sensitive: prefs.case_sensitive,
             time: None,
+            time_stack: Vec::new(),
             visible: Vec::new(),
             patterns: Vec::new(),
             selected: 0,
@@ -511,6 +527,7 @@ impl App {
             message: None,
             show_help: false,
             confirm_quit: false,
+            confirm_clear_bookmarks: false,
             should_quit: false,
             generation: 0,
             find_generation: 0,
@@ -749,6 +766,11 @@ impl App {
     }
 
     pub fn back(&mut self) {
+        if let Some(prev) = self.time_stack.pop() {
+            self.time = prev;
+            self.rebuild();
+            return;
+        }
         self.view = match self.view {
             View::All => self.came_from,
             _ => View::Patterns,
@@ -881,17 +903,54 @@ impl App {
 
     pub fn set_time(&mut self, src: &str) -> Result<(), String> {
         self.time = self.time_range(src)?;
+        self.time_stack.clear();
         self.rebuild();
         Ok(())
     }
 
+    pub fn clear_find(&mut self) {
+        if self.find.take().is_some() {
+            self.find_generation += 1;
+        }
+    }
+
+    pub fn clear_bookmarks(&mut self) {
+        self.bookmarks.clear();
+    }
+
+    /// Which displayed histogram buckets contain a bookmark.
+    ///
+    /// This is proportional to the number of bookmarks, not loaded entries.
+    pub fn bookmark_buckets(&self, first: NaiveDateTime, secs: i64, len: usize) -> Vec<bool> {
+        let mut marks = vec![false; len];
+        let secs = secs.max(1);
+        for key in &self.bookmarks {
+            let Some(&i) = self.bookmark_entries.get(key) else { continue };
+            let Some(t) = self.time_of(i).filter(|&t| t >= first) else { continue };
+            let idx = ((t - first).num_seconds() / secs) as usize;
+            if let Some(slot) = marks.get_mut(idx) {
+                *slot = true;
+            }
+        }
+        marks
+    }
+
     /// Releasing the timeline. A drag filters to the buckets it covered. A
-    /// click in a raw-line view jumps to that bucket instead; on the pattern
-    /// view a click filters to the one bucket, as a drag of no distance.
-    pub fn release_timeline(&mut self, a: usize, b: usize) {
-        if a != b || self.view == View::Patterns {
+    /// single click in a raw-line view jumps to that bucket. A single click on
+    /// the pattern view does nothing. A double-click in any view filters to
+    /// the five buckets centred on it, clipped to the histogram.
+    pub fn release_timeline(&mut self, a: usize, b: usize, clicks: u8) {
+        if a != b {
             self.select_buckets(a, b);
-        } else {
+            return;
+        }
+        if clicks >= 2 {
+            let Some(g) = self.hist_geom else { return };
+            let last = g.len.saturating_sub(1);
+            self.select_buckets(a.saturating_sub(2), (a + 2).min(last));
+            return;
+        }
+        if self.view != View::Patterns {
             self.jump_to_bucket(a);
         }
     }
@@ -936,7 +995,16 @@ impl App {
         let (lo, hi) = (a.min(b) as i64, a.max(b) as i64);
         let from = g.start + TimeDelta::seconds(lo * g.secs);
         let to = g.start + TimeDelta::seconds((hi + 1) * g.secs);
-        self.time = Some((from, to));
+        self.apply_mouse_time(Some((from, to)));
+    }
+
+    /// A drag or double-click. The range it replaces is kept for Backspace.
+    fn apply_mouse_time(&mut self, range: Option<(NaiveDateTime, NaiveDateTime)>) {
+        if self.time == range {
+            return;
+        }
+        self.time_stack.push(self.time);
+        self.time = range;
         self.rebuild();
     }
 
@@ -966,6 +1034,18 @@ impl App {
             PromptKind::GoTo | PromptKind::AddFiles => String::new(),
         };
         self.prompt = Some(Prompt { kind, input: text.into() });
+    }
+
+    /// Include, then Exclude, then Find, then close. Other prompts stay put.
+    /// Switching reloads that field's saved text.
+    pub fn cycle_filter_prompt(&mut self) {
+        match self.prompt.as_ref().map(|p| p.kind) {
+            None => self.open_prompt(PromptKind::Include),
+            Some(PromptKind::Include) => self.open_prompt(PromptKind::Exclude),
+            Some(PromptKind::Exclude) => self.open_prompt(PromptKind::Find),
+            Some(PromptKind::Find) => self.prompt = None,
+            Some(_) => {}
+        }
     }
 
     /// Apply the prompt. On a bad entry it stays open with the error showing.
@@ -1048,6 +1128,63 @@ impl App {
             return;
         }
         self.seek_hit(forward, false);
+    }
+
+    fn cursor_entry(&self) -> Option<usize> {
+        match self.view {
+            View::Patterns => None,
+            View::Lines => self.selected_lines().get(self.line_cursor).copied(),
+            View::All => self.visible.get(self.all_cursor).copied(),
+        }
+    }
+
+    fn bookmarked(&self, entry: usize) -> bool {
+        self.entries.get(entry).is_some_and(|e| self.bookmarks.contains(&(e.file, e.file_line)))
+    }
+
+    /// Mark or unmark the cursor line. Patterns have no line to mark.
+    pub fn toggle_bookmark(&mut self) {
+        let Some(idx) = self.cursor_entry() else { return };
+        let key = (self.entries[idx].file, self.entries[idx].file_line);
+        if !self.bookmarks.remove(&key) {
+            self.bookmarks.insert(key);
+        }
+    }
+
+    /// Previous or next marked row in Lines or All, wrapping. Patterns do nothing.
+    pub fn bookmark_next(&mut self, forward: bool) {
+        if !matches!(self.view, View::Lines | View::All) {
+            return;
+        }
+        let hits: Vec<usize> = (0..self.list_len())
+            .filter(|&p| {
+                let entry = match self.view {
+                    View::Lines => self.selected_lines().get(p).copied(),
+                    View::All => self.visible.get(p).copied(),
+                    View::Patterns => None,
+                };
+                entry.is_some_and(|e| self.bookmarked(e))
+            })
+            .collect();
+        let cur = self.cursor();
+        let target = if hits.is_empty() {
+            None
+        } else if forward {
+            let i = hits.partition_point(|&h| h <= cur);
+            hits.get(i).or(hits.first()).copied()
+        } else {
+            match hits.partition_point(|&h| h < cur) {
+                0 => hits.last().copied(),
+                i => Some(hits[i - 1]),
+            }
+        };
+        match target {
+            Some(t) => {
+                self.set_cursor(t);
+                self.centre();
+            }
+            None => self.message = Some("no bookmarks here".into()),
+        }
     }
 
     fn sel_key(&self) -> SelKey {
@@ -1175,8 +1312,7 @@ impl App {
         }
     }
 
-    fn positioned(&self, entries: &[(&str, MenuAction)], text: String, col: u16, row: u16, screen: (u16, u16)) -> Menu {
-        let entries = entries.iter().map(|(s, a)| (s.to_string(), *a)).collect();
+    fn positioned(&self, entries: Vec<(String, MenuAction)>, text: String, col: u16, row: u16, screen: (u16, u16)) -> Menu {
         let mut menu = Menu { x: 0, y: 0, title: None, text, entries, at: 0 };
         let (x, y) = Menu::place(col, row, screen, menu.width(), menu.height());
         menu.x = x;
@@ -1194,14 +1330,33 @@ impl App {
             self.message = Some("nothing selected: drag or double-click some text".into());
             return;
         };
-        let entries = [("Include", MenuAction::Include), ("Exclude", MenuAction::Exclude), ("Find", MenuAction::Find)];
-        self.menu = Some(self.positioned(&entries, text, col, row, screen));
+        let mut entries = vec![
+            ("Include".to_string(), MenuAction::Include),
+            ("Exclude".to_string(), MenuAction::Exclude),
+            ("Find".to_string(), MenuAction::Find),
+        ];
+        if matches!(self.view, View::Lines | View::All)
+            && let Some(h) = self.row_at(row)
+            && let Some(&idx) = match self.view {
+                View::Lines => self.selected_lines().get(h.pos),
+                View::All => self.visible.get(h.pos),
+                View::Patterns => None,
+            }
+        {
+            let key = (self.entries[idx].file, self.entries[idx].file_line);
+            let label = if self.bookmarks.contains(&key) { "Remove bookmark" } else { "Bookmark" };
+            entries.push((label.to_string(), MenuAction::Bookmark(key.0, key.1)));
+        }
+        self.menu = Some(self.positioned(entries, text, col, row, screen));
     }
 
     /// Right click on the timeline.
     pub fn open_timeline_menu(&mut self, col: u16, row: u16, screen: (u16, u16)) {
-        let entries = [("Clear time filter", MenuAction::ClearTime), ("Choose time period", MenuAction::ChooseTime)];
-        self.menu = Some(self.positioned(&entries, String::new(), col, row, screen));
+        let entries = vec![
+            ("Clear time filter".to_string(), MenuAction::ClearTime),
+            ("Choose time period".to_string(), MenuAction::ChooseTime),
+        ];
+        self.menu = Some(self.positioned(entries, String::new(), col, row, screen));
     }
 
     /// Write the theme and the Settings toggles into `config.toml`.
@@ -1372,6 +1527,13 @@ impl App {
                 self.open_prompt(PromptKind::Exclude);
                 Ok(())
             }
+            MenuAction::Bookmark(file, line) => {
+                let key = (file, line);
+                if !self.bookmarks.remove(&key) {
+                    self.bookmarks.insert(key);
+                }
+                Ok(())
+            }
             MenuAction::Inert => Ok(()),
         };
         if let Err(e) = result {
@@ -1391,8 +1553,19 @@ impl App {
     /// Replace everything loaded with `logs`, combined as at startup. Filters
     /// and toggles stay; cursors go back to the top.
     pub fn set_logs(&mut self, logs: Vec<FileLog>) {
+        let carried: Vec<(String, Option<PathBuf>, usize)> = self
+            .bookmarks
+            .iter()
+            .filter_map(|&(file, line)| Some((self.files.get(file)?.clone(), self.paths.get(file)?.clone(), line)))
+            .collect();
         self.files = logs.iter().map(|f| f.name.clone()).collect();
         self.paths = logs.iter().map(|f| f.path.clone()).collect();
+        self.bookmarks = carried
+            .into_iter()
+            .filter_map(|(name, path, line)| {
+                self.files.iter().zip(&self.paths).position(|(n, p)| n == &name && p == &path).map(|file| (file, line))
+            })
+            .collect();
         let (mut entries, combined, warning) = parse::combine_logs(logs);
         self.kind = parse::classify(&mut entries);
         self.source = source_label(&self.files, combined);
@@ -1400,6 +1573,7 @@ impl App {
         self.when = parse::carry_forward(&entries);
         self.first_day = entries.iter().find_map(|e| e.ts).map(|t| t.date());
         self.entries = entries;
+        self.bookmark_entries = self.entries.iter().enumerate().map(|(i, e)| ((e.file, e.file_line), i)).collect();
         self.visible.clear();
         self.patterns.clear();
         self.selected = 0;
@@ -1450,6 +1624,7 @@ impl App {
         self.include = None;
         self.exclude = None;
         self.time = None;
+        self.time_stack.clear();
         self.rebuild();
         self.message = Some("filters cleared".into());
     }
@@ -1563,8 +1738,12 @@ mod tests {
 
     #[test]
     fn macros_expand_inside_a_regex() {
-        let mut app = app_from(&["from 10.1.2.3 ok", "from host ok"]);
-        app.set_include("from %ip%").unwrap();
+        let mut app = app_from(&["from 10.1.2.3 ok", "from host ok", "2026-10-16 started", "from 2001:db8::1 ok"]);
+        app.set_include("from %ip4%").unwrap();
+        assert_eq!(app.total_matching(), 1);
+        app.set_include("%ip6%").unwrap();
+        assert_eq!(app.total_matching(), 1);
+        app.set_include("%date%").unwrap();
         assert_eq!(app.total_matching(), 1);
     }
 
@@ -1620,15 +1799,51 @@ mod tests {
             start: app.entries[0].ts.unwrap(),
             secs: 60,
         });
-        app.release_timeline(5, 2);
+        app.release_timeline(5, 2, 1);
         assert_eq!(app.total_matching(), 4, "a drag filters");
-        app.release_timeline(3, 3);
-        assert_eq!(app.total_matching(), 1, "a click on the pattern view filters to that bucket");
+        let dragged = app.time;
+        app.release_timeline(3, 3, 1);
+        assert_eq!(app.time, dragged, "a single click on the pattern view does nothing");
+        app.release_timeline(5, 5, 2);
+        assert_eq!(app.total_matching(), 5, "a double-click takes five buckets around the click");
+        app.release_timeline(0, 0, 2);
+        assert_eq!(app.total_matching(), 3, "the window clips at the first bucket");
         app.set_time("").unwrap();
         app.toggle_all_view();
-        app.release_timeline(7, 7);
+        app.release_timeline(7, 7, 1);
         assert_eq!(app.cursor_time().unwrap().to_string(), "2026-10-16 09:07:00", "a click jumps");
         assert!(app.time.is_none(), "a click does not filter");
+    }
+
+    #[test]
+    fn mouse_time_changes_stack_and_typing_or_clearing_empties_it() {
+        let lines: Vec<String> = (0..10).map(|m| format!("2026-10-16 09:{m:02}:00 [INFO] tick")).collect();
+        let mut app = App::new(parse_lines(lines), "test".into());
+        app.hist_geom = Some(HistGeom {
+            x: 0,
+            y: 0,
+            height: 4,
+            len: 10,
+            start: app.entries[0].ts.unwrap(),
+            secs: 60,
+        });
+        app.release_timeline(5, 5, 2);
+        let zoom = app.time;
+        app.release_timeline(1, 3, 1);
+        assert_ne!(app.time, zoom);
+        app.back();
+        assert_eq!(app.time, zoom, "Backspace restores the double-click");
+        app.set_time("09:04").unwrap();
+        app.toggle_all_view();
+        app.back();
+        assert_eq!(app.view, View::Patterns, "a typed range empties the stack, so Backspace steps back a view");
+        assert!(app.time.is_some());
+        app.release_timeline(5, 5, 2);
+        let _ = app.set_time("");
+        assert!(app.time.is_none());
+        app.toggle_all_view();
+        app.back();
+        assert_eq!(app.view, View::Patterns, "clearing the filter leaves nothing to pop");
     }
 
     #[test]
@@ -1643,9 +1858,9 @@ mod tests {
             start: app.entries[0].ts.unwrap(),
             secs: 60,
         });
-        app.release_timeline(2, 2);
+        app.release_timeline(2, 2, 1);
         assert_eq!(app.entries[app.visible[app.all_cursor]].raw, "2026-10-16 09:00:00 [INFO] a");
-        app.release_timeline(4, 4);
+        app.release_timeline(4, 4, 1);
         assert_eq!(app.entries[app.visible[app.all_cursor]].raw, "2026-10-16 09:05:00 [INFO] b");
     }
 
@@ -1740,6 +1955,90 @@ mod tests {
     fn histogram_is_empty_without_timestamps() {
         let mut app = app_from(&["no timestamp here", "nor here"]);
         assert!(app.histogram(40).is_empty());
+    }
+
+    #[test]
+    fn histogram_uses_two_minute_buckets_before_five() {
+        // 09:00 to 09:10 is 600s. Into 10 columns, 60s does not fit and 120s does.
+        let lines: Vec<String> = (0..=10).map(|m| format!("2026-10-16 09:{m:02}:00 [INFO] tick")).collect();
+        let mut app = App::new(parse_lines(lines), "test".into());
+        let n = app.histogram(10).len();
+        assert_eq!(app.bucket_secs, 120);
+        assert!(n <= 10, "got {n} buckets");
+    }
+
+    #[test]
+    fn histogram_steps_up_to_two_days() {
+        let lines = vec!["2026-10-16 00:00:00 [INFO] a".into(), "2026-10-18 00:00:00 [INFO] b".into()];
+        let mut app = App::new(parse_lines(lines), "test".into());
+        let n = app.histogram(2).len();
+        assert_eq!(app.bucket_secs, 172800);
+        assert!(n <= 2, "got {n} buckets");
+    }
+
+    #[test]
+    fn tab_cycles_include_exclude_find_then_closes() {
+        let mut app = app_from(&["[INFO] a"]);
+        app.cycle_filter_prompt();
+        assert!(matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Include)));
+        app.cycle_filter_prompt();
+        assert!(matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Exclude)));
+        app.cycle_filter_prompt();
+        assert!(matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Find)));
+        app.cycle_filter_prompt();
+        assert!(app.prompt.is_none());
+        app.open_prompt(PromptKind::Time);
+        app.cycle_filter_prompt();
+        assert!(matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Time)));
+    }
+
+    #[test]
+    fn bookmarks_follow_file_and_line_and_skip_hidden_ones() {
+        let mut app = App::from_logs(vec![
+            log("a.log", &["2026-10-16 09:00:00 [INFO] a1", "2026-10-16 09:00:20 [ERR] a2"]),
+            log("b.log", &["2026-10-16 09:00:10 [INFO] b1"]),
+        ]);
+        app.bookmark_next(true);
+        app.toggle_bookmark();
+        assert!(app.bookmarks.is_empty(), "the pattern view has no line to mark");
+        app.toggle_all_view();
+        app.toggle_bookmark();
+        app.move_selection(1);
+        app.toggle_bookmark();
+        assert_eq!(app.bookmarks, HashSet::from([(0, 1), (1, 1)]));
+        assert_eq!(app.entries[app.visible[2]].file_line, 2, "the error keeps its own file line");
+        app.jump(false);
+        app.bookmark_next(true);
+        assert_eq!(app.all_cursor, 1);
+        app.bookmark_next(true);
+        assert_eq!(app.all_cursor, 0, "next wraps");
+        app.bookmark_next(false);
+        assert_eq!(app.all_cursor, 1, "previous wraps");
+        app.solo_level(Severity::Error);
+        app.bookmark_next(true);
+        assert_eq!(app.message.as_deref(), Some("no bookmarks here"));
+        app.solo_level(Severity::Error);
+        assert_eq!(app.bookmarks, HashSet::from([(0, 1), (1, 1)]), "a hidden mark stays stored");
+        app.jump(false);
+        app.bookmark_next(true);
+        assert_eq!(app.entries[app.visible[app.all_cursor]].raw, "2026-10-16 09:00:10 [INFO] b1");
+        app.remove_file(0);
+        assert_eq!(app.files, ["b.log"]);
+        assert_eq!(app.bookmarks, HashSet::from([(0, 1)]), "the removed file's mark goes, the other follows its file");
+    }
+
+    #[test]
+    fn bookmark_buckets_look_up_bookmarks_by_file_and_line() {
+        let mut app = app_from(&[
+            "2026-10-16 09:00:00 [INFO] a",
+            "2026-10-16 09:01:00 [INFO] b",
+            "2026-10-16 09:02:00 [INFO] c",
+        ]);
+        app.toggle_all_view();
+        app.move_selection(1);
+        app.toggle_bookmark();
+        let first = app.entries[0].ts.unwrap();
+        assert_eq!(app.bookmark_buckets(first, 60, 3), [false, true, false]);
     }
 
     #[test]
@@ -1867,6 +2166,26 @@ mod tests {
         app.open_timeline_menu(5, 5, (80, 24));
         app.pick_menu(1, (80, 24));
         assert!(matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Time)));
+    }
+
+    #[test]
+    fn the_line_menu_offers_bookmark_and_patterns_do_not() {
+        let mut app = app_from(&["[INFO] alpha beta"]);
+        app.toggle_all_view();
+        lay_out(&mut app);
+        app.open_menu(17, 0, (80, 24));
+        assert_eq!(app.menu.as_ref().unwrap().items().last().copied(), Some("Bookmark"));
+        let last = app.menu.as_ref().unwrap().items().len() - 1;
+        app.pick_menu(last, (80, 24));
+        assert_eq!(app.bookmarks.len(), 1);
+        lay_out(&mut app);
+        app.open_menu(17, 0, (80, 24));
+        assert_eq!(app.menu.as_ref().unwrap().items().last().copied(), Some("Remove bookmark"));
+        app.view = View::Patterns;
+        lay_out(&mut app);
+        app.selection = None;
+        app.open_menu(17, 0, (80, 24));
+        assert!(app.menu.as_ref().unwrap().items().iter().all(|s| !s.contains("ookmark")));
     }
 
     #[test]
@@ -2059,8 +2378,8 @@ mod tests {
     fn patterns_show_mask_names_and_keep_grouping_by_key() {
         let app = app_from(&["[ERR] conn 10.0.0.1 failed", "[ERR] conn 10.0.0.2 failed"]);
         let p = &app.patterns[0];
-        assert_eq!(p.text, "[ERR] conn ADDR failed");
-        assert_eq!(&p.text[p.masks[0].clone()], "ADDR");
+        assert_eq!(p.text, "[ERR] conn IPv4 failed");
+        assert_eq!(&p.text[p.masks[0].clone()], "IPv4");
         assert_eq!(p.count, 2);
     }
 
