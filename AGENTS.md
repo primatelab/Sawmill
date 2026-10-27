@@ -1,145 +1,197 @@
-# Sawmill — agent handoff
+---
+name: sawmill
+description: >-
+  Triage logs with Sawmill, a terminal app and MCP server that groups lines
+  into patterns, filters by severity and time, and draws a timeline. Use when
+  reading, filtering, summarizing, or investigating log files, gzip logs, or
+  piped command output, or when calling sawmill --mcp (open_logs, overview,
+  patterns, pattern_lines, lines, context, timeline, set_filters).
+---
 
-Interactive log triage TUI ("Dissecting Logs"). Standalone project at `~/Projects/Sawmill`. It was Logsview until 2026-10-19. Gordon chose this over putting it under `~/Projects/SkunkWorks`. He does not have time to work on it right now; pick up from here.
+# Sawmill
 
-Commit `d6296a8` on `master` is local only. No remote. Do not commit or push unless he asks. `AGENTS.md` itself is uncommitted.
+Sawmill dissects logs. One binary, two fronts: a terminal UI, and `--mcp` for an agent. Both apply the same parse, the same masks, and the same filters.
 
-## What it is
+`README.md` is the human overview. This file is how an agent uses the product.
 
-A ratatui app that loads a log and shows three things:
+## Use the tools first
 
-1. **Timeline** — stacked severity histogram. Bucket width snaps to a ladder (`1s` … `2d`) so the span fits the terminal width. The bars sit in the middle of the timeline when they do not fill it.
-2. **Patterns** — lines collapsed to a shape (UUIDs, addresses, paths, hex, quoted strings, numbers become placeholders) and ranked by frequency. This is the `loguniq` idea, generalised past stripping a fixed timestamp column.
-3. **Lines** — `Enter` drills into the raw lines behind the selected pattern.
+For pattern frequency, severity mix, a time window, or what a log is mostly made of, use Sawmill. Start with the MCP tools below. Use grep, awk, or jq only for a question those tools cannot express.
 
-A fourth view, **All lines** (`a`), is the filtered stream in file order, LogSnout-style. `Enter` walks pattern → its lines → that line in context → its pattern.
+## Triage
 
-LogSnout (`~/Code/LogSnout/logsnout.sh`) features were ported on 2026-10-16. `?` shows the key list in the app; the source of truth is `HELP` in `ui.rs` and `on_key` in `main.rs`. In short: `e w i d o` toggle a level and `E W I D O` solo it (again for all); on a web log, `5 4 3 2 1 0` do the same toggles (`3` and `2` are one filter, `0` is other) and the letter keys still work; `/` include and `\` exclude regex; `Tab` cycles Include, Exclude, Find, then back; a prompt edits with the cursor (`tui-input`: arrows, Home/End, Ctrl-arrows by word, Ctrl-Backspace/Ctrl-Delete delete a word); `c` case; `f` find with `F` to clear and `P`/`N` (previous / next); `g` go to line; `l` wrap; `←`/`→` sideways; `s` mouse off for copying; power scroll is Settings only; in Lines and All lines, `Space` marks or unmarks the cursor line (a bright green `▶` before the line number; the mark is that file and its line number, and it lasts for the session) and `p`/`n` jump to the previous or next mark (`B` clears them after asking); a bucket that holds a mark has a bright green `▿` above its bar; `Esc` clears find, then goes back; on the pattern view it offers Files, Settings, Themes or Quit (below). Macros from the config (`%UUID%` by default), the builtins `%IP4%`, `%IP6%` and `%DATE%`, and `%FIND%` expand inside any regex. Regexes are case-insensitive by default, as in LogSnout. `f` used to cycle severity; it is find now.
+1. `open_logs` loads the files into a named session and returns an overview.
+2. `overview` is the lie of the land: kind, span, severity mix, filters, files, mask names, and the top shapes. Call it again whenever a count looks wrong.
+3. `patterns` ranks shapes by count. Read the mask names as placeholders.
+4. `pattern_lines` shows the raw lines behind one shape. Read a few before trusting the shape.
+5. `context` shows the lines around one line number.
+6. `set_filters` narrows every later read. Then `overview` and `timeline` to check the hypothesis.
+7. `lines` pages the filtered stream, or lands on `around_line` / `at_time`.
+8. `close_logs` frees the session. A large log is a lot of memory.
 
-Time filtering: `t` takes `15:55`, `15:55..15:58`, `15:55..+5m`, `Feb 15`, either side optional; or drag across the timeline. A double-click keeps the five buckets centred on the click, clipped at the ends. A single click on the pattern view does nothing. Mouse time changes stack, and Backspace pops one; typing a range or clearing the filter (`T`, an empty `t`, or Clear time filter) empties the stack. The end is inclusive of what it names. Lines without a timestamp inherit the previous one for time filtering only, so tracebacks stay with their record. The histogram itself still counts only stamped lines.
+`open_logs` and `set_filters` already include an overview, so a change needs no second call unless you want a fresh `top`.
 
-Mouse and quit (added 2026-10-16): `q` asks "Are you sure?" (`y`/`q`/`Enter` quits, anything else cancels; Ctrl-C quits at once). Hovering the timeline shows the bucket's time span and line count. In the raw-line views (Lines and All lines) the bucket holding the cursor line (`App::cursor_time`, carried forward for continuation lines) is drawn in lighter colours on a grey background, the same as a drag in progress (`Theme::severity_lit` and the `lit` predicate in `render_bars`). Clicking a bucket in those views jumps the cursor to its first line, or the nearest line by time (`App::release_timeline`); a drag still sets the time filter. A double-click in any view filters to the five buckets centred on it. Right-clicking the timeline offers Clear time filter and Choose time period. In the list, drag selects within one item (leaving the item clamps to its start or end), double-click on the text takes `[alnum-_]+`, triple-click takes everything up to whitespace, a plain click only moves the cursor. Double-clicking a pattern's count or level drills in, as Enter does. Double-clicking the line number or file name of a raw line opens it in the all-lines view, again as Enter does. A `│` separates that gutter from the text, and the line number from a raw line. Right-click on the text opens Include / Exclude / Find; the text is `regex::escape`d and replaces the existing filter. In Lines and All it also offers Bookmark or Remove bookmark for that row. Lists draw a vertical scrollbar when they overflow and a horizontal one when a line is wider than the view and wrap is off. Both drag: a press on the track jumps there (`App::vbar`/`hbar` record where they were drawn), the arrows step by one. Wrap (`l`) applies to the cursor row only, in both the pattern and raw-line views; every other row is truncated, and horizontal scroll is ignored while wrap is on. With wrap on, `#012` is a newline, and the wrapped block stops at 75% of the list height (`wrap_rows` in `ui.rs`) with a `…`. On every row that is not wrapped, `#012` is drawn as `⏎`. `normalise` splits on `#012` so it survives grouping instead of becoming a number placeholder. The cursor row is drawn bold on a grey background (`cursor_style` in `ui.rs`), not reversed, so find hits and selections keep their colours on it. Raw-line rows show the file name after the line number (`Entry::file` indexes `App::files`, set by `combine_logs`; names are cut at 24 characters). `ui.rs` records where each list row's text was drawn (`App::rows`, `RowHit`) so mouse columns map back to characters; a selection is keyed to view, pattern and filter generation and dies when any changes. Loading runs on a thread behind a gauge; for gzip the percentage is compressed bytes read against file size. Above the gauge, five frames from `~/Code/buzz` (snapshotted in `src/buzz.rs`) play at 10fps. Esc during loading aborts with exit 130.
+### Sessions and transport
 
-Not ported from LogSnout: tabulate (`b`), the `~/.config/loggs` config file and `conf` editor, and syslog hostname tinting.
+`session` defaults to `"default"`. Files named on the command line are loaded there before the first request. `open_logs` replaces that session; `add: true` appends, and files already loaded are skipped. Paths accept globs and a leading `~/`. Directories and repeats are skipped.
 
-Config (added 2026-10-19): `~/.config/sawmill/config.toml` (or `$XDG_CONFIG_HOME/sawmill/`) holds `[[mask]]` (name + regex, run in order), `[macros]` (`NAME = 'regex'` gives `%NAME%`), `[[highlight]]` (regex, `fg`/`bg` as ratatui colour names, `#rrggbb` or an index, plus `bold`/`italic`/`dim`/`underline`) and `[ui]` (theme, wrap, mouse, case_sensitive, power_scroll). `config::DEFAULT` is both the built-in rules and what a first run writes when the file is missing. As of 2026-10-23 that string is Gordon's config: the address mask is named `IPv4` and has no leading word boundary, macros include `UUID` and `OBJECT`, and the highlight rules include braces, Python `#012 File`, `::` modules and paths. A section left out falls back to its default; a section present replaces it entirely, except `[ui]`, where a missing key keeps its default. A bad file prints the error and exits 2. `config::get()` returns the defaults when `init` was never called, so tests never read the user's file. Highlight rules colour raw lines and pattern text; a mask name is drawn struck through on top of them. A colour name is mapped onto the current theme when it is drawn (`Theme::resolve`); `#rrggbb` and a 256-colour index stay as written. The terminal theme leaves names as ANSI colours. Changing the theme or a Settings toggle rewrites only the `[ui]` block (`config::replace_ui`), so comments and the other sections stay. Unit tests do not write the file.
+Stdin is the protocol. It is never read as a log. Diagnostics go to stderr.
 
-Masks: each mask leaves one private-use character (`U+E000 + index`) in `Entry::pattern`, so a masked address and the literal word `IPv4` never group together. `parse::display_pattern` turns that key into `Pattern::text` (mask names as written in the config, e.g. `IPv4`, `NUM`, `IPv6`) plus `Pattern::masks` byte ranges, which `highlight::pattern` strikes through. Compare patterns by `Pattern::key`, never by `text`.
+One JSON-RPC request is answered before the next is read. A slow `open_logs` blocks the client. Methods are `initialize`, `tools/list`, `tools/call`, and `ping`. A notification is acted on and not answered. Protocol versions `2024-11-05`, `2025-03-26`, and `2025-06-18` are accepted and echoed; anything else is answered as the newest.
 
-Esc on the pattern view offers Files, Settings, Themes, then Quit. Quit asks the same "Are you sure?" as `q`. Settings toggles line wrap, mouse, case sensitivity and power scroll (the menu stays open and the label flips between on and off), opens the include and exclude prompts, and clears filters. The keyboard toggles `l`, `s` and `c` save too. Power scroll is Settings only. Themes lists Herdr's eighteen themes (catppuccin through vesper, including `terminal`) and then Monokai, from the original palette; the current one is marked `*` and the menu stays open. `terminal` is the original ANSI look, and the one an unknown name falls back to. A truecolor theme fills the frame; the buzzsaw frames stay as they were drawn. Files (added 2026-10-19) has Add files… (a prompt taking whitespace-separated globs, `~/` expanded; directories, already-loaded files and repeats are skipped; misses are reported), Remove <name> for each file when more than one is loaded, and Clear filters when any are set. Stdin cannot be removed; when it contributed any lines it is listed in place, drawn grey, and the cursor, mouse and initial-letter shortcut all skip it. `App::pending_add` hands the globs to `main`, which loads them behind the same gauge as startup (`load()`; Esc cancels the add instead of exiting). Adding or removing splits the entries back per file (`parse::split_logs`, ordered by `Entry::file_line`, the per-file line number), then recombines everything through `App::set_logs`, so merge vs. concatenate and the gap warning are decided again. Filters and toggles stay; cursors reset.
+A bad frame or an unknown method is a JSON-RPC error. A mistake an agent can make — missing file, missing session, bad regex, unknown level — comes back as a normal result with `isError: true` and the reason as text. A bad `set_filters` changes nothing.
 
-```bash
-cargo run -- ~/Code/ansible-testlog.log
-cargo run --release -- ~/million.log.gz   # gzip detected by magic bytes
-cargo run --release -- app1.log app2.log  # merged or concatenated, see below
-some-command 2>&1 | cargo run
-some-command 2>&1 | cargo run -- app.log   # the pipe and the file, combined
-cargo run --release -- --mcp ~/Code/ansible-testlog.log   # MCP server, see below
-```
+### Pages and cost
 
-A terminal with neither a file nor a pipe exits 2. A pipe is read as `stdin` as well as any named files; an empty pipe beside files is ignored. An empty file, or a pipe on its own with no lines, exits 1.
+`limit` defaults to 50 and caps at 500. Lists report `total`, `offset`, and `next_offset`. Each line is cut at 500 characters. A reply is cut at 64KB and says so.
 
-Multiple files (added 2026-10-16) are each parsed, then `parse::combine_logs` decides how to join them: if any two files' time spans overlap, every entry is interleaved by timestamp (`Combined::Merged`); otherwise the files are laid end to end in order of their span's start, not command-line order (`Combined::Concatenated`). A continuation line with no timestamp of its own carries the one before it, same as `App`'s own `when` vector — both now share `parse::carry_forward`. `line_no` is renumbered 1.. over the combined order; the per-file number is kept in `Entry::file_line` so files can be split apart again. If two concatenated files' gap is more than half the combined span, `App::message` carries a one-line warning naming them, shown in the status bar like any other message. A file with no timestamps at all can't be placed, so it sorts last, in the order given, and is excluded from the gap check. Stdin and a lone file are unaffected: `Combined::Concatenated` with no files to warn about.
+Plain text is the default (`N │ text`, plus a file column when more than one file is loaded). `format: "json"` adds `n`, `ts`, `level`, `file`, and `text`. `patterns` and `lines` take `matching`, a regex for that call only; session filters stay as they are.
 
-## MCP mode
-
-`--mcp` (added 2026-10-19) serves the same views to an agent instead of a person: a hand-rolled JSON-RPC 2.0 server, newline-delimited on stdin and stdout, one request at a time, no SDK and no async. `serde_json` is the only dependency it added. The `rmcp` crate was turned down because it drags in tokio.
-
-Nine tools: `open_logs`, `close_logs`, `overview`, `set_filters`, `patterns`, `pattern_lines`, `lines`, `context`, `timeline`. `initialize`, `tools/list`, `tools/call` and `ping` are the only methods; a notification is acted on and not answered. Protocol versions `2024-11-05`, `2025-03-26` and `2025-06-18` are accepted and echoed, anything else gets the newest. The `instructions` string in the initialize result is what teaches an agent about masks and the triage route, so change it when the tools change.
-
-A protocol fault (bad frame, unknown method) is a JSON-RPC error. Everything an agent can get wrong — no such file, no session, bad regex, unknown level — comes back as a normal result with `isError: true` and the reason as text, because that is what the agent actually reads.
-
-Logs live in named sessions, each a whole `App` with its own filters; `session` defaults to `"default"`, which is also where files named on the command line land. `open_logs` replaces that session unless `add: true`. `close_logs` frees it — a million-line log is a GB of memory.
-
-Output is budgeted. `limit` defaults to 50 and caps at 500, a line is cut at 500 characters, and a whole reply at 64KB with a note saying so. Lists report `total`, `offset` and `next_offset`. Line tools render plain text by default (`N │ file │ text`, the file column only when more than one is loaded) because it costs a fraction of the tokens of `format: "json"`, which is there when an agent wants the timestamp and level as fields. `overview` is returned by `open_logs` and `set_filters` too, so a change needs no second call.
-
-`set_filters` leaves out what you leave out, clears a field with `null`, and clears everything when called with no fields. Everything is validated before anything is applied, so a bad regex changes nothing. `patterns` and `lines` also take `matching`, a regex for that one call that does not touch session state.
-
-Stdin is the transport, so it is never read as a log in this mode; diagnostics go to stderr. `config::init()` still runs, so masks and macros are the same ones the TUI uses.
+`context` ignores session filters unless `respect_filters` is set. `before` and `after` default to 5. `timeline` divides the span into `buckets` (default 60).
 
 ```json
-{ "mcpServers": { "sawmill": { "command": "/home/ggstuart/Projects/Sawmill/target/release/sawmill", "args": ["--mcp"] } } }
+{
+  "mcpServers": {
+    "sawmill": {
+      "command": "sawmill",
+      "args": ["--mcp"]
+    }
+  }
+}
 ```
 
-## Why Rust
+`sawmill --mcp app.log` is the same server with `default` already loaded.
 
-`cargo` 1.94 is installed; `go` is not. Gordon already has a Rust workspace at `~/AI/yule`. ratatui 0.30 / crossterm 0.29 / regex / chrono (no default features, `clock` + `std`) / clap derive / toml 0.9 + serde / serde_json / glob. Edition 2024.
+### `set_filters`
 
-Seed material is the bash tools in `~/Code/ggtools/ggtools/`: `logplot` (314), `logstat` (55), `logtint` (28), `loguniq` (5). Do not modify ggtools. Sawmill replaces them; it does not wrap them.
+Omitted fields stay. `null` clears one field. A call with no fields clears them all. `levels` takes `ERROR`, `WARN`, `INFO`, `DEBUG`, `OTHER`, or the web names `5xx`, `4xx`, `3xx`, `2xx`, `1xx`. Either set works on either kind of log. `3xx` is the same bucket as `2xx`.
 
-## Layout
+`time` takes `15:55`, `15:55..15:58`, `15:55..+5m`, `Feb 15`, `..15:58`, with either side optional. The end includes the moment it names.
 
-| File | Role |
+## How to read a result
+
+### Patterns
+
+A pattern is the line with its variable parts replaced by mask names from the config, written as they appear: `IPv4`, `IPv6`, `NUM`, `DATE`, `UUID`, and so on. `overview` lists the masks in effect. Lines that differ only by an id, address, or number land in one group.
+
+The name is a placeholder for the match. The same letters as ordinary text are a different pattern. Pass `pattern_lines` the index from `patterns`, or the text exactly as it was printed.
+
+A group is labelled by the severity most of its lines carry. A tie goes to the more severe level. One error inside a quiet pattern leaves the label alone. A real level token survives masking, so `[INFO]` and `[ERROR]` are already different groups.
+
+### Time
+
+A timestamp counts when it begins within 4 characters of the start of the line. Common Log Format is the exception: the client address comes first, and `[dd/Mon/yyyy:` may begin within 64 characters. A date later in the line is payload. It does not move the histogram.
+
+The shapes are ISO (`2026-10-16`, `2026-10-16T09:21:29.123Z`, `2026/10/16 09:21:29+00:00`), a month name (`Oct 16 09:21:29`, `October 16, 2026`), Common Log (`16/Oct/2026:09:21:29`), day then month (`16 October 2026`), and numeric (`16/10/2026`, `10-16-26`). A date with no clock is midnight. A numeric date is day-first when both numbers could be a month, and month-first when only the second is greater than 12. A two-digit year pivots at 70. The zone offset is dropped and the clock is kept as written.
+
+A line with no timestamp of its own inherits the previous one for filtering, so a traceback stays with its record. The histogram counts only lines that carry a timestamp of their own.
+
+A syslog date with no year uses the current year.
+
+### Severity and kind
+
+A level is a delimited token. `libgpg-error` is not an error, and `"Warning: …"` inside quotes is prose.
+
+`overview` reports `kind`. `web` means quoted requests followed by a status (`"GET /path HTTP/1.1" 200`) outnumber those level tokens, and there are at least three statuses. Otherwise the log is `system`.
+
+On a web log the five buckets are `5xx`, `4xx`, `2xx` (with `3xx`), `1xx`, and other (no status). The terminal status bar shows `5 4 3 2 1 0`; `3` and `2` are one filter.
+
+### Line numbers
+
+Blank lines are omitted. In a single file the reported number is the line in that file, so a blank leaves a gap in the sequence. With more than one file the number is the combined sequence, and the file column names the source. That combined number is what `around_line`, `context`, and the terminal gutter use.
+
+### Several files
+
+Each file is parsed, then joined. Overlapping spans are interleaved by timestamp. Spans that do not overlap are laid end to end by when they start, which may differ from command-line order. A file with no timestamps sorts last, in the order given. A gap wider than half the combined span is named in the terminal status bar.
+
+An empty pipe beside real files is ignored. Stdin cannot be removed from the terminal file list.
+
+## Filters and macros
+
+Regexes are case-insensitive unless `case_sensitive` is set. Inside any regex, `%NAME%` expands to a macro from the config. Built in, unless the config defines the same name: `%IP4%` (an IPv4 address with an optional port), `%IP6%`, and `%DATE%` (the five timestamp shapes as one alternation). The default config also defines `%UUID%` and `%OBJECT%`. In the terminal, `%FIND%` expands to the current find term.
+
+Find highlights and jumps. Include and exclude decide which lines exist.
+
+## Terminal
+
+Press `?` for the key list.
+
+| Key | Action |
 |---|---|
-| `src/parse.rs` | Timestamp, severity, normalisation, typed time ranges (`parse_range`). Pure functions. |
-| `src/app.rs` | State: filters, `visible` entry indices, grouping, cached histogram, cursors, find hits, prompt. No terminal types. |
-| `src/config.rs` | Config file: masks, macros, highlight rules, `[ui]`. `DEFAULT` is the built-in TOML. Placeholder characters. |
-| `src/theme.rs` | Nineteen themes. `terminal` is the ANSI palette, Monokai is the original palette, and the rest are Herdr's truecolor ones. |
-| `src/highlight.rs` | Highlight rules from the config as layered ratatui spans. Later rules paint over earlier ones. Colour names are resolved against the current theme. Pattern view uses the same rules; mask names replace them. |
-| `src/buzz.rs` | The five buzzsaw frames drawn above the loading gauge. |
-| `src/ui.rs` | ratatui draw. `histogram()` is called from here because bucket width depends on the widget width. Lists are windowed: only on-screen rows are built. |
-| `src/mcp.rs` | MCP server: JSON-RPC framing, the tool catalogue and their JSON payloads. The only file that knows about the protocol. |
-| `src/main.rs` | clap, config init, file/gzip/stdin, loading thread, glob expansion for Add files, key and mouse handling. |
+| `e` `w` `i` `d` `o` | Toggle Error, Warn, Info, Debug, Other |
+| `E` `W` `I` `D` `O` | That level only; again for all |
+| `5` `4` `3` `2` `1` `0` | The same toggles on a web log |
+| `/` `\` | Include / exclude regex. Empty clears it |
+| `Tab` | Cycle Include, Exclude, Find, then close |
+| `c` | Case sensitivity |
+| `t` `T` | Type a time range. Empty or `T` clears it |
+| `f` `F` `P` `N` | Find, clear find, previous hit, next hit |
+| `g` | Go to a line number |
+| `a` | All lines, in file order |
+| `Enter` | Pattern → its lines → that line in context → its pattern |
+| `l` | Wrap the cursor row. Other rows stay truncated |
+| `←` `→` | Scroll sideways when wrap is off |
+| `s` | Mouse off, so the terminal can copy |
+| `Space` | Bookmark the cursor line, in Lines and All lines |
+| `p` `n` | Previous / next bookmark |
+| `B` | Clear bookmarks, after `y` / `n` |
+| `q` | Quit, after `y`, `q`, or Enter. Ctrl-C quits at once |
+| `Esc` | Clear find, then step back. Backspace pops a mouse time zoom first |
 
-Keep parsing and state free of ratatui so they stay unit-testable, and free of MCP for the same reason. 160 tests (157 unit, 3 in `tests/mcp_pipe.rs`), `cargo clippy --all-targets -- -D warnings` clean as of 2026-10-23. Run both before changing behaviour.
+`Esc` on the pattern view offers Files, Settings, Themes, then Quit. Files adds globs, removes a loaded file when more than one is loaded, and clears filters. Settings toggles wrap, mouse, case sensitivity, and power scroll, and can edit include and exclude. Those four toggles and the theme are written back to `[ui]` only. Themes marks the current palette with `*`. `terminal` keeps the terminal's own colours and is the fallback for an unknown name.
 
-## Decisions already paid for
+Bookmarks last for the session. A marked line has a bright green mark before its number, and a bucket that holds one has a mark above its bar. Right-click in Lines or All lines offers Bookmark or Remove bookmark for that row.
 
-These came out of running it on `~/Code/ansible-testlog.log` (2MB, 37986 non-blank lines, all dated 2023-09-18 15:54:49–15:57:24). Do not regress them.
+Drag on the timeline sets the time range. A double-click keeps the five buckets centred on the click, clipped at the ends. A single click on the pattern view does nothing. In Lines and All lines, a single click jumps to that bucket. Mouse time changes stack; Backspace pops one. Typing a range, `T`, an empty `t`, or Clear time filter empties the stack. Right-click on the timeline offers Clear time filter and Choose time period. Hover shows the bucket's span and count.
 
-**Timestamps must start near the beginning of the line.** `parse_timestamp` only accepts a match whose start is within `STAMP_OFFSET` (4) characters, except Common Log Format which allows `CLF_OFFSET` (64) because the client address comes first and `[dd/Mon/yyyy:` is distinctive. Scanning further in is wrong: line `ActiveEnterTimestamp: Wed 2021-06-23 18:05:10 BST` is payload nested inside Ansible output. Treating it as the line's timestamp dragged the histogram back to 2021 and collapsed the whole log into one 86400s bucket. After the fix the span reads `15:54:49 → 15:57:24` in 5s buckets. The five shapes are ISO (`2026-10-16`, `2026-10-16T09:21:29.123Z`, `2026/10/16 09:21:29+00:00`), month-first (`Oct 16 09:21:29`, `October 16, 2026`), Common Log (`16/Oct/2026:09:21:29`), day-month (`16 October 2026`) and numeric (`16/10/2026`, `10-16-26`). A date with no clock is midnight. A numeric date is day-first when both numbers could be a month, and month-first when only the second is greater than 12; a two-digit year pivots at 70. The zone offset is ignored and the clock time is kept as written. A mask or highlight with `builtin = "DATE"` expands to those five shapes, in that order, and takes the entry's name and style. `builtin = "IP4"` is an IPv4 address with an optional port and no leading word boundary; `builtin = "IP6"` is an IPv6 address, and the built-in config runs it before `IP4` so an IPv4-mapped address stays one token. `%IP4%`, `%IP6%` and `%DATE%` are macros too (`%DATE%` is the five shapes as one alternation). A macro of the same name in the file replaces that builtin. The built-in config names the date mask `DATE` and the address mask `IPv4`. A bare clock time stays a separate `TIME` mask.
+Drag inside a row selects within that row. Double-click takes a word (`[A-Za-z0-9_-]+`); triple-click takes the text up to whitespace. Right-click on the text offers Include, Exclude, or Find, and the selection replaces that filter as an escaped regex. Double-click a pattern's count or level to drill in. Double-click a raw line's number or file name to open it in All lines.
 
-**Severity is a delimited token, not a word-boundary match.** `\berror\b` matches inside `libgpg-error` because `-` is a boundary, and `"Warning: Permanently added…"` in quoted SSH stderr is prose, not a level. The regex in `patterns().severity` requires a delimiter on both sides. Test names: `severity_ignores_hyphenated_identifiers`, `severity_ignores_quoted_prose`.
+Wrap turns `#012` into a line break on the cursor row, and the block stops at 75% of the list height. Everywhere else `#012` is drawn as `⏎`, and it stays a break during grouping. The cursor row is bold on grey, so find hits keep their colour.
 
-**An access log is a different kind, detected from the lines.** `parse::classify`, called from `App::set_logs`, counts quoted requests followed by a status (`"GET /path HTTP/1.1" 200`) against delimited level tokens. Web when the statuses are more numerous and there are at least three, so one quoted request inside a syslog stays a system log. `5xx` is red (`Error`), `4xx` yellow (`Warn`), `2xx` and `3xx` cyan (`Info`, gutter `2xx`), `1xx` blue (`Debug`), and a line with no status is `Other`. The histogram and `e w i d o` are the same five buckets. On a web log the status bar shows `5 4 3 2 1 0`, and those keys toggle; `3` and `2` are one filter. `overview` reports `kind`. `set_filters` accepts either set of names.
+Esc during loading exits 130. Gzip progress is compressed bytes read against the file size.
 
-**A pattern group is labelled by its dominant severity, not its worst line.** `dominant()` in `app.rs` picks the most frequent level. `Severity::ALL` is worst-first; `max_by_key` keeps the *last* maximum, so the walk is reversed and ties go to the worse level. One stray error must not paint hundreds of benign lines red. Level tokens survive normalisation, so `[INFO] …` and `[ERROR] …` already form separate groups when the level is a real token — `dominant()` matters for lines whose severity comes from somewhere the normaliser also collapses.
+## Config
 
-**Patterns hold entry indices, not line numbers.** Blank lines are skipped, so `line_no - 1` is not an index into `entries`. The old drill-down did that and showed the wrong lines, or none, after the first blank line. Test: `drilling_in_survives_blank_lines`.
+`~/.config/sawmill/config.toml`, or `$XDG_CONFIG_HOME/sawmill/config.toml`. The file is written on first run from the built-in defaults.
 
-**Filters run once per change, never per frame.** `rebuild()` fills `visible` across all cores; the histogram is cached by width and a generation counter. On `~/million.log.gz` (1,000,000 lines) a regex include or a level toggle redraws in about 0.1s. Lists draw only the rows on screen, so the all-lines view of a million entries costs the same as ten.
+| Section | Role |
+|---|---|
+| `[[mask]]` | Name plus regex, or `builtin` of `IP4`, `IP6`, or `DATE`. They run in order |
+| `[macros]` | `NAME = 'regex'` becomes `%NAME%`. A name that matches a builtin replaces it |
+| `[[highlight]]` | Colour for raw lines and pattern text. Later rules paint over earlier ones |
+| `[ui]` | `theme`, `wrap`, `mouse`, `case_sensitive`, `power_scroll` |
 
-**Histogram bars use `▄` at two units per cell**: lower unit in the foreground, upper in the background. `allocate()` gives every present severity at least one unit, so a single error in a busy bucket still shows. The old one-unit-per-cell code could round errors off the top.
+A section left out keeps its default. A section that is present replaces that default. A key left out of `[ui]` keeps its default. A file that does not parse prints the error and exits 2.
 
-**Numbers glued to a unit must collapse.** `\b\d+\b` left `30s` and `95s` as distinct patterns. The `NUM` mask uses `\b\d+(\.\d+)?` with no trailing boundary. Mask order in the config matters: timestamps, addresses and UUIDs run before the bare-number rule. The built-in `PATH` mask is commented out.
+Mask order is the match. The built-in order puts UUID, then IPv6, then IPv4, then the date shapes, then a bare clock (`TIME`), hex, hashes, and quoted strings, and `NUM` last. `NUM` has no trailing boundary, so `30s` and `95s` collapse together. IPv6 runs before IPv4 so an IPv4-mapped address stays one token. `builtin = "IP4"` has no leading word boundary. A bare clock on its own is `TIME`; it is also a timestamp when it sits at the start of the line.
 
-**`parse_lines` is the load-time bottleneck, not reading the file.** On `~/million.log.gz` reading and inflating the lines took under a second; running every regex over all 1,000,000 of them took ~8s single-threaded. It now splits into chunks across `available_parallelism()` and parses each in a scoped thread, same shape as `par_filter`. Total load (file + parse + group) dropped from ~8.7s to ~2.3s release-built. Test: `parses_a_chunk_boundary_without_losing_or_misnumbering_lines` checks `line_no` stays contiguous across a chunk seam.
+A colour name follows the current theme. `#rrggbb` and a 256-colour index stay as written. Mask names are drawn struck through on top of the highlight rules.
 
-## Known limitation — the next piece of work
+## Run
 
-On the Ansible log the top patterns are JSON fragments (`source: rpm`, `epoch: null`, `arch: x86_64`), because most lines are module payload rather than log records. That is accurate and useless for triage.
-
-The obvious next feature is a toggle (suggest `t`) that keeps only lines `parse_timestamp` could read. On this log that cuts straight to the Ansible event lines. Put the flag on `App`, filter inside `matches()`, and add a test that a payload continuation line drops out while a leading-timestamp line stays. Do not special-case Ansible.
-
-## Not done, and not asked for
-
-- `README.md` is the human overview (logo, purpose, features). This file stays the agent handoff.
-- MCP serves tools only: no resources, no prompts, no sampling, no progress notifications, and no batching. One request is answered before the next is read, so a slow `open_logs` blocks the client.
-- No follow mode. Selections cannot span lines. Column mapping assumes one cell per character, so wide (CJK) characters throw selection off.
-- Histogram columns are one cell wide. Dragging works; there is no keyboard bucket cursor, `t` covers that.
-- `lines()` drops lines that fail UTF-8 (`map_while(Result::ok)`). Fine for the logs tested; a binary blob will silently truncate the file.
-- Syslog dates with no year use the current year (`Utc::now().year()`). A December log opened in January will be wrong. Not hit yet.
-- Whole file is loaded into memory. 2MB was instant. Do not stream until a real log forces it.
-
-## Verify against a real log
-
-Unit tests do not render. After a UI or parsing change:
-
-```bash
-cargo test && cargo clippy --all-targets
-(sleep 2; printf 'qy') | script -qec "stty rows 30 cols 130; ./target/debug/sawmill $HOME/Code/ansible-testlog.log" /dev/null > /tmp/lv.out
-```
-
-Replay the capture and check the timeline footer still says `2023-09-18 15:54:49 → 15:57:24` and that pattern rows are not labelled `ERROR` just because a package name contains the word. `printf 'E'` before `q` exercises the error-only filter.
-
-MCP needs no terminal, so a pipe is enough. Requests go in, one reply comes out per line:
+The release binary targets Linux amd64. Elsewhere, build it.
 
 ```bash
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"open_logs","arguments":{"paths":["~/Code/ansible-testlog.log"]}}}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"patterns","arguments":{"limit":3}}}' \
-  | ./target/release/sawmill --mcp
+sawmill app.log
+sawmill app.log.gz
+sawmill app1.log app2.log
+some-command 2>&1 | sawmill
+some-command 2>&1 | sawmill app.log
+sawmill --mcp
 ```
 
-For multi-step checks, drive a detached tmux pane (`tmux new-session -d -x 130 -y 32 …`, `send-keys`, `capture-pane -p`, `-e` for colours). Mouse can be injected as SGR bytes with `send-keys -l`, for example `\e[<0;6;5M` press, `\e[<32;12;5M` drag, `\e[<0;12;5m` release. The agent shell sets `NO_COLOR=1`, which crossterm honours, so run the binary under `env -u NO_COLOR` or every capture comes out monochrome.
+```bash
+cargo run --release -- app.log
+cargo run --release -- --mcp
+```
+
+Gzip is detected from the file, not the name. With neither a file nor a pipe, Sawmill exits 2. An empty file, or a pipe on its own with no lines, exits 1.
+
+## Limits
+
+- There is no switch that keeps only lines with their own timestamp. Payload and continuation lines are real patterns. On a log that is mostly structured payload, the top shapes are those fragments. Narrow them with include, exclude, or a time range.
+- The file is loaded whole. There is no follow mode.
+- A selection stays inside one row. Columns are one cell wide, so a selection on a wide character can miss.
+- Histogram columns are one cell wide. Dragging and `t` cover them; there is no keyboard bucket cursor.
+- A line that is not valid UTF-8 ends the read of that file.
+- MCP serves tools only: no resources, prompts, sampling, progress notifications, or batched requests.
