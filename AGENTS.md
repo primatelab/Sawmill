@@ -128,6 +128,7 @@ Press `?` for the key list.
 | `f` `F` `P` `N` | Find, clear find, previous hit, next hit |
 | `g` | Go to a line number |
 | `a` | All lines, in file order |
+| `r` | Reload files changed on disk. Filters, bookmarks and the view stay |
 | `Enter` | Pattern → its lines → that line in context → its pattern |
 | `l` | Wrap the cursor row. Other rows stay truncated |
 | `←` `→` | Scroll sideways when wrap is off |

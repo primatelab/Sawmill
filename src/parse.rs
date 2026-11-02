@@ -3,6 +3,7 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use regex::Regex;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Severity {
@@ -514,11 +515,21 @@ pub fn carry_forward(entries: &[Entry]) -> Vec<Option<NaiveDateTime>> {
         .collect()
 }
 
+/// Size and mtime of a file at the moment it was read.
+/// `modified` is absent when the filesystem cannot say.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FileStamp {
+    pub modified: Option<SystemTime>,
+    pub len: u64,
+}
+
 /// One log file's name, where it was read from (`None` for stdin), and its parsed lines.
 pub struct FileLog {
     pub name: String,
     pub path: Option<PathBuf>,
     pub entries: Vec<Entry>,
+    /// Stamp taken when the file was read. `None` for stdin.
+    pub stamp: Option<FileStamp>,
 }
 
 /// Undo `combine_logs`: each file's entries back in their own order.
@@ -526,7 +537,7 @@ pub struct FileLog {
 pub fn split_logs(entries: Vec<Entry>, files: &[(String, Option<PathBuf>)]) -> Vec<FileLog> {
     let mut out: Vec<FileLog> = files
         .iter()
-        .map(|(name, path)| FileLog { name: name.clone(), path: path.clone(), entries: Vec::new() })
+        .map(|(name, path)| FileLog { name: name.clone(), path: path.clone(), entries: Vec::new(), stamp: None })
         .collect();
     for e in entries {
         out[e.file].entries.push(e);
@@ -877,7 +888,7 @@ mod tests {
     #[test]
     fn a_single_file_is_renumbered_but_otherwise_untouched() {
         let entries = vec![entry(Some("2026-01-01 00:00:05"), "a"), entry(None, "b")];
-        let (out, combined, warning) = combine_logs(vec![FileLog { name: "f".into(), path: None, entries }]);
+        let (out, combined, warning) = combine_logs(vec![FileLog { name: "f".into(), path: None, stamp: None, entries }]);
         assert_eq!(combined, Combined::Concatenated);
         assert!(warning.is_none());
         assert_eq!(out.iter().map(|e| e.raw.as_str()).collect::<Vec<_>>(), ["a", "b"]);
@@ -889,7 +900,7 @@ mod tests {
         let a = vec![entry(Some("2026-01-01 00:00:00"), "a1"), entry(Some("2026-01-01 00:00:10"), "a2")];
         let b = vec![entry(Some("2026-01-01 00:00:05"), "b1"), entry(Some("2026-01-01 00:00:15"), "b2")];
         let (out, combined, warning) =
-            combine_logs(vec![FileLog { name: "a".into(), path: None, entries: a }, FileLog { name: "b".into(), path: None, entries: b }]);
+            combine_logs(vec![FileLog { name: "a".into(), path: None, stamp: None, entries: a }, FileLog { name: "b".into(), path: None, stamp: None, entries: b }]);
         assert_eq!(combined, Combined::Merged);
         assert!(warning.is_none());
         assert_eq!(out.iter().map(|e| e.raw.as_str()).collect::<Vec<_>>(), ["a1", "b1", "a2", "b2"]);
@@ -905,7 +916,7 @@ mod tests {
             e.file_line = i + 1;
         }
         b[0].file_line = 1;
-        let (out, ..) = combine_logs(vec![FileLog { name: "a".into(), path: None, entries: a }, FileLog { name: "b".into(), path: None, entries: b }]);
+        let (out, ..) = combine_logs(vec![FileLog { name: "a".into(), path: None, stamp: None, entries: a }, FileLog { name: "b".into(), path: None, stamp: None, entries: b }]);
         let back = split_logs(out, &[("a".into(), None), ("b".into(), None)]);
         let raws = |f: &FileLog| f.entries.iter().map(|e| e.raw.clone()).collect::<Vec<_>>();
         assert_eq!(raws(&back[0]), ["a1", "a2"]);
@@ -942,7 +953,7 @@ mod tests {
     fn a_continuation_line_merges_with_the_record_it_follows() {
         let a = vec![entry(Some("2026-01-01 00:00:00"), "a1"), entry(None, "  traceback")];
         let b = vec![entry(Some("2026-01-01 00:00:01"), "b1")];
-        let (out, ..) = combine_logs(vec![FileLog { name: "a".into(), path: None, entries: a }, FileLog { name: "b".into(), path: None, entries: b }]);
+        let (out, ..) = combine_logs(vec![FileLog { name: "a".into(), path: None, stamp: None, entries: a }, FileLog { name: "b".into(), path: None, stamp: None, entries: b }]);
         assert_eq!(out.iter().map(|e| e.raw.as_str()).collect::<Vec<_>>(), ["a1", "  traceback", "b1"]);
     }
 
@@ -952,7 +963,7 @@ mod tests {
         let b = vec![entry(Some("2026-01-01 00:00:10"), "b1")];
         // Given out of order on the command line.
         let (out, combined, warning) =
-            combine_logs(vec![FileLog { name: "b".into(), path: None, entries: b }, FileLog { name: "a".into(), path: None, entries: a }]);
+            combine_logs(vec![FileLog { name: "b".into(), path: None, stamp: None, entries: b }, FileLog { name: "a".into(), path: None, stamp: None, entries: a }]);
         assert_eq!(combined, Combined::Concatenated);
         assert_eq!(out.iter().map(|e| e.raw.as_str()).collect::<Vec<_>>(), ["a1", "b1"]);
         assert!(warning.is_some(), "a 10s gap is the entire 10s span");
@@ -963,7 +974,7 @@ mod tests {
         let a = vec![entry(Some("2026-01-01 00:00:00"), "a1"), entry(Some("2026-01-01 00:01:00"), "a2")];
         let b = vec![entry(Some("2026-01-01 00:01:10"), "b1")];
         let (_, combined, warning) =
-            combine_logs(vec![FileLog { name: "a".into(), path: None, entries: a }, FileLog { name: "b".into(), path: None, entries: b }]);
+            combine_logs(vec![FileLog { name: "a".into(), path: None, stamp: None, entries: a }, FileLog { name: "b".into(), path: None, stamp: None, entries: b }]);
         assert_eq!(combined, Combined::Concatenated);
         assert!(warning.is_none(), "a 10s gap in a 70s span is under 50%");
     }
@@ -973,7 +984,7 @@ mod tests {
         let a = vec![entry(Some("2026-01-01 00:00:00"), "a1")];
         let b = vec![entry(None, "b1")];
         let (out, combined, warning) =
-            combine_logs(vec![FileLog { name: "b".into(), path: None, entries: b }, FileLog { name: "a".into(), path: None, entries: a }]);
+            combine_logs(vec![FileLog { name: "b".into(), path: None, stamp: None, entries: b }, FileLog { name: "a".into(), path: None, stamp: None, entries: a }]);
         assert_eq!(combined, Combined::Concatenated);
         assert_eq!(out.iter().map(|e| e.raw.as_str()).collect::<Vec<_>>(), ["a1", "b1"]);
         assert!(warning.is_none());

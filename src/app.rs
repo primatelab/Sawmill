@@ -1,5 +1,5 @@
 use crate::config;
-use crate::parse::{self, Entry, FileLog, LogKind, Severity};
+use crate::parse::{self, Entry, FileLog, FileStamp, LogKind, Severity};
 use crate::theme;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 use regex::{NoExpand, Regex, RegexBuilder};
@@ -108,6 +108,16 @@ pub enum View {
     Patterns,
     Lines,
     All,
+}
+
+/// The view and the cursor's file line, captured across a reload.
+struct Place {
+    view: View,
+    came_from: View,
+    pattern_key: Option<String>,
+    line: Option<(usize, usize)>,
+    all: Option<(usize, usize)>,
+    tops: [usize; 3],
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -398,8 +408,12 @@ pub struct App {
     pub files: Vec<String>,
     /// Where each file was read from; `None` is stdin.
     paths: Vec<Option<PathBuf>>,
+    /// Stamp of each file when it was read, parallel to `paths`. `None` for stdin.
+    stamps: Vec<Option<FileStamp>>,
     /// Globs typed into the add-files prompt, for the caller to load.
     pub pending_add: Option<String>,
+    /// `r` was pressed. The caller reloads files that changed on disk.
+    pub pending_refresh: bool,
     /// Shown severities, indexed by `Severity as usize`.
     pub levels: [bool; 5],
     pub include: Option<Query>,
@@ -483,7 +497,9 @@ impl App {
             first_day,
             files: vec![source.clone()],
             paths: vec![None],
+            stamps: vec![None],
             pending_add: None,
+            pending_refresh: false,
             source,
             kind: LogKind::System,
             levels: [true; 5],
@@ -1547,7 +1563,11 @@ impl App {
     /// Every file's entries, back as separate logs, leaving `entries` empty.
     fn take_logs(&mut self) -> Vec<FileLog> {
         let files: Vec<(String, Option<PathBuf>)> = self.files.iter().cloned().zip(self.paths.iter().cloned()).collect();
-        parse::split_logs(std::mem::take(&mut self.entries), &files)
+        let mut logs = parse::split_logs(std::mem::take(&mut self.entries), &files);
+        for (log, stamp) in logs.iter_mut().zip(std::mem::take(&mut self.stamps)) {
+            log.stamp = stamp;
+        }
+        logs
     }
 
     /// Replace everything loaded with `logs`, combined as at startup. Filters
@@ -1560,6 +1580,7 @@ impl App {
             .collect();
         self.files = logs.iter().map(|f| f.name.clone()).collect();
         self.paths = logs.iter().map(|f| f.path.clone()).collect();
+        self.stamps = logs.iter().map(|f| f.stamp).collect();
         self.bookmarks = carried
             .into_iter()
             .filter_map(|(name, path, line)| {
@@ -1591,6 +1612,78 @@ impl App {
     /// Paths already loaded, for skipping repeats when adding.
     pub fn loaded_paths(&self) -> Vec<PathBuf> {
         self.paths.iter().flatten().cloned().collect()
+    }
+
+    /// Disk files and the stamp taken when each was read. Stdin is left out.
+    /// A missing stamp means the file has a path but was never stamped.
+    pub fn watched_files(&self) -> Vec<(usize, PathBuf, Option<FileStamp>)> {
+        self.paths
+            .iter()
+            .enumerate()
+            .filter_map(|(i, path)| Some((i, path.clone()?, self.stamps.get(i).copied().flatten())))
+            .collect()
+    }
+
+    /// Where the screen was, so a reload can put it back.
+    fn capture_place(&self) -> Place {
+        let at = |entry: Option<usize>| entry.and_then(|i| self.entries.get(i).map(|e| (e.file, e.file_line)));
+        let line = at(self.selected_lines().get(self.line_cursor).copied());
+        let all = at(self.visible.get(self.all_cursor).copied());
+        Place { view: self.view, came_from: self.came_from, pattern_key: self.selected_pattern().map(|p| p.key.clone()), line, all, tops: self.tops }
+    }
+
+    /// Put the view, pattern and cursor back after `set_logs` reset them.
+    fn restore_place(&mut self, place: Place) {
+        self.view = place.view;
+        self.came_from = place.came_from;
+        if let Some(key) = place.pattern_key {
+            if let Some(i) = self.patterns.iter().position(|p| p.key == key) {
+                self.selected = i;
+            }
+        }
+        if let Some(key) = place.line {
+            if let Some(&e) = self.bookmark_entries.get(&key) {
+                if let Some(pos) = self.selected_lines().iter().position(|&i| i == e) {
+                    self.line_cursor = pos;
+                }
+            }
+        }
+        if let Some(key) = place.all {
+            if let Some(&e) = self.bookmark_entries.get(&key) {
+                self.all_cursor = self.visible.iter().position(|&i| i == e).unwrap_or_else(|| nearest(&self.visible, e));
+            }
+        }
+        let lens = [self.patterns.len(), self.selected_lines().len(), self.visible.len()];
+        self.tops = place.tops;
+        for (top, len) in self.tops.iter_mut().zip(lens) {
+            *top = (*top).min(len.saturating_sub(1));
+        }
+        let cursor = self.cursor();
+        let top = self.tops[self.view as usize];
+        let page = self.page_rows.max(1);
+        if cursor < top || cursor >= top + page {
+            self.centre();
+        }
+    }
+
+    /// Replace files already loaded, by index, and recombine as an add or
+    /// remove does. Filters and bookmarks stay, and so does the view.
+    pub fn replace_files(&mut self, replacements: Vec<(usize, FileLog)>) {
+        let n = replacements.len();
+        let place = self.capture_place();
+        let mut logs = self.take_logs();
+        for (i, log) in replacements {
+            if i < logs.len() {
+                logs[i] = log;
+            }
+        }
+        self.set_logs(logs);
+        self.restore_place(place);
+        let refreshed = format!("refreshed {n} file{}", if n == 1 { "" } else { "s" });
+        self.message = Some(match self.message.take() {
+            Some(w) => format!("{refreshed}; {w}"),
+            None => refreshed,
+        });
     }
 
     /// Add more files to what is loaded.
@@ -2214,7 +2307,7 @@ mod tests {
 
     fn log(name: &str, lines: &[&str]) -> FileLog {
         let entries = parse_lines(lines.iter().map(|s| s.to_string()).collect());
-        FileLog { name: name.into(), path: Some(PathBuf::from(format!("/logs/{name}"))), entries }
+        FileLog { name: name.into(), path: Some(PathBuf::from(format!("/logs/{name}"))), entries, stamp: None }
     }
 
     fn all_raw(app: &App) -> Vec<&str> {
@@ -2234,6 +2327,34 @@ mod tests {
         assert_eq!(all_raw(&app), ["2026-10-16 09:00:00 [INFO] a1", "2026-10-16 09:00:20 [INFO] a2", "2026-10-16 09:00:30 [INFO] c1", "  continued"]);
         assert_eq!(app.entries.iter().map(|e| (e.file, e.line_no)).collect::<Vec<_>>(), [(0, 1), (0, 2), (1, 3), (1, 4)]);
         assert_eq!(app.message.as_deref(), Some("removed b.log"));
+    }
+
+    #[test]
+    fn refreshing_a_file_keeps_filters_bookmarks_and_the_view() {
+        let mut app = App::from_logs(vec![
+            log("a.log", &["2026-10-16 09:00:00 [INFO] keep", "2026-10-16 09:00:01 [ERR] drop"]),
+            log("b.log", &["2026-10-16 09:00:02 [INFO] other"]),
+        ]);
+        app.toggle_level(Severity::Error);
+        app.set_include("keep|other|added").unwrap();
+        app.toggle_all_view();
+        app.toggle_bookmark();
+        assert_eq!(app.view, View::All);
+        assert_eq!(app.came_from, View::Patterns);
+        assert_eq!(app.bookmarks, HashSet::from([(0, 1)]));
+
+        app.replace_files(vec![(0, log("a.log", &["2026-10-16 09:00:00 [INFO] keep", "2026-10-16 09:00:01 [ERR] drop", "2026-10-16 09:00:03 [INFO] added"]))]);
+
+        assert_eq!(app.view, View::All, "the view stays");
+        assert_eq!(app.came_from, View::Patterns);
+        assert!(!app.levels[Severity::Error as usize]);
+        assert!(app.include.is_some());
+        assert_eq!(app.bookmarks, HashSet::from([(0, 1)]), "the mark stays on that file line");
+        assert_eq!(app.entries[app.visible[app.all_cursor]].raw, "2026-10-16 09:00:00 [INFO] keep");
+        assert_eq!(app.message.as_deref(), Some("refreshed 1 file"));
+        assert!(all_raw(&app).iter().any(|l| l.contains("added")));
+        assert!(all_raw(&app).iter().any(|l| l.contains("other")), "the file that was not reloaded stays");
+        assert_eq!(app.total_matching(), 3, "the error line stays filtered out");
     }
 
     #[test]

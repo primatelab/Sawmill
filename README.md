@@ -31,6 +31,7 @@ Press `?` inside the app for the key list.
 | `t` `T` | Time range. `15:55`, `15:55..15:58`, `15:55..+5m`, `Feb 15`. Empty clears it. `T` clears it. Backspace steps back through mouse zooms |
 | `f` `F` `P` `N` | Find a regex, then previous / next hit. `F` clears the find |
 | `g` | Go to a line number |
+| `r` | Reload files that changed on disk. Filters, bookmarks and the current view stay |
 | `Space` | Mark or unmark the cursor line, in Lines and All lines |
 | `p` `n` | Previous / next bookmark |
 | `B` | Clear bookmarks, after asking |

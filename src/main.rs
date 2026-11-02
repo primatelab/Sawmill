@@ -12,7 +12,7 @@ use tui_input::backend::crossterm::EventHandler;
 use tui_input::InputRequest;
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
-use parse::{LogKind, Severity};
+use parse::{FileStamp, LogKind, Severity};
 use ratatui::crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -50,14 +50,15 @@ struct Opened {
     path: Option<PathBuf>,
     reader: Box<dyn BufRead + Send>,
     size: Option<u64>,
+    stamp: Option<FileStamp>,
 }
 
 fn open_path(path: &Path, n: &Arc<AtomicU64>) -> io::Result<Opened> {
     let name = path
         .file_name()
         .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into());
-    let (reader, size) = open(path, n.clone())?;
-    Ok(Opened { name, path: Some(path.to_path_buf()), reader, size: Some(size) })
+    let (reader, stamp) = open(path, n.clone())?;
+    Ok(Opened { name, path: Some(path.to_path_buf()), reader, size: Some(stamp.len), stamp: Some(stamp) })
 }
 
 fn main() -> io::Result<()> {
@@ -81,7 +82,7 @@ fn main() -> io::Result<()> {
     if !io::stdin().is_terminal() {
         let stdin = Counted { inner: io::stdin(), n: read_bytes.clone() };
         let reader = Box::new(io::BufReader::new(stdin));
-        opened.push(Opened { name: "stdin".to_string(), path: None, reader, size: None });
+        opened.push(Opened { name: "stdin".to_string(), path: None, reader, size: None, stamp: None });
     }
     if opened.is_empty() {
         eprintln!("sawmill: give me a file or pipe a log in. See --help.");
@@ -117,6 +118,7 @@ fn parse_opened(opened: Vec<Opened>) -> Vec<parse::FileLog> {
             name: o.name,
             path: o.path,
             entries: parse::parse_lines(lines(o.reader).collect()),
+            stamp: o.stamp,
         })
         .collect()
 }
@@ -253,6 +255,72 @@ fn add_files(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &str)
     Ok(())
 }
 
+/// Files whose size or mtime differs from the stamp taken when they were read.
+/// A file that cannot be stat'd is reported and left as it is.
+fn changed_files(app: &App) -> (Vec<(usize, PathBuf)>, Vec<String>) {
+    let mut changed = Vec::new();
+    let mut errors = Vec::new();
+    for (i, path, stamp) in app.watched_files() {
+        match stamp_of(&path) {
+            Ok(now) if stamp.is_some_and(|old| old == now) => {}
+            Ok(_) => changed.push((i, path)),
+            Err(e) => errors.push(format!("{}: {e}", path.display())),
+        }
+    }
+    (changed, errors)
+}
+
+/// `Some` when nothing should be reloaded: either nothing changed, or every
+/// change was a file that could not be stat'd.
+fn refresh_notice(changed: &[(usize, PathBuf)], errors: &[String]) -> Option<String> {
+    if !changed.is_empty() {
+        return None;
+    }
+    Some(if errors.is_empty() { "nothing has changed".into() } else { errors.join("; ") })
+}
+
+fn stamp_of(path: &Path) -> io::Result<FileStamp> {
+    let meta = std::fs::metadata(path)?;
+    Ok(FileStamp { modified: meta.modified().ok(), len: meta.len() })
+}
+
+/// Re-read files that changed on disk, the same way adding files does.
+/// Filters, bookmarks and the current view stay. An unchanged set is reported
+/// and left alone.
+fn refresh_files(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
+    let (changed, mut errors) = changed_files(app);
+    if let Some(notice) = refresh_notice(&changed, &errors) {
+        app.message = Some(notice);
+        return Ok(());
+    }
+    let n = Arc::new(AtomicU64::new(0));
+    let mut opened = Vec::new();
+    let mut indexes = Vec::new();
+    for (i, path) in &changed {
+        match open_path(path, &n) {
+            Ok(o) => {
+                indexes.push(*i);
+                opened.push(o);
+            }
+            Err(e) => errors.push(format!("{}: {e}", path.display())),
+        }
+    }
+    if !opened.is_empty() {
+        match load(terminal, opened, &n)? {
+            Some(logs) => app.replace_files(indexes.into_iter().zip(logs).collect()),
+            None => errors.insert(0, "refresh cancelled".into()),
+        }
+    }
+    if !errors.is_empty() {
+        let errs = errors.join("; ");
+        app.message = Some(match app.message.take() {
+            Some(m) => format!("{m}; {errs}"),
+            None => errs,
+        });
+    }
+    Ok(())
+}
+
 /// Counts the bytes that pass through, for the loading gauge.
 struct Counted<R> {
     inner: R,
@@ -272,9 +340,10 @@ impl<R: Read> Read for Counted<R> {
 /// rewound before the decoder or the plain reader sees it. `n` counts file
 /// bytes consumed, which for a gzip is compressed bytes, to set against the
 /// returned file size.
-fn open(path: &Path, n: Arc<AtomicU64>) -> io::Result<(Box<dyn BufRead + Send>, u64)> {
+fn open(path: &Path, n: Arc<AtomicU64>) -> io::Result<(Box<dyn BufRead + Send>, FileStamp)> {
     let mut file = std::fs::File::open(path)?;
-    let size = file.metadata()?.len();
+    let meta = file.metadata()?;
+    let stamp = FileStamp { modified: meta.modified().ok(), len: meta.len() };
     let mut magic = [0; 2];
     let got = file.read(&mut magic)?;
     file.seek(io::SeekFrom::Start(0))?;
@@ -284,7 +353,7 @@ fn open(path: &Path, n: Arc<AtomicU64>) -> io::Result<(Box<dyn BufRead + Send>, 
     } else {
         Box::new(io::BufReader::new(file))
     };
-    Ok((reader, size))
+    Ok((reader, stamp))
 }
 
 fn lines<R: BufRead>(reader: R) -> impl Iterator<Item = String> {
@@ -347,6 +416,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()>
         }
         if let Some(text) = app.pending_add.take() {
             add_files(terminal, app, &text)?;
+        }
+        if app.pending_refresh {
+            app.pending_refresh = false;
+            refresh_files(terminal, app)?;
         }
         if app.mouse != mouse {
             if app.mouse {
@@ -464,6 +537,7 @@ fn on_key(app: &mut App, key: KeyEvent, screen: (u16, u16)) {
         KeyCode::Char('p') => app.bookmark_next(false),
         KeyCode::Char('n') => app.bookmark_next(true),
         KeyCode::Char('a' | 'A') => app.toggle_all_view(),
+        KeyCode::Char('r' | 'R') => app.pending_refresh = true,
         KeyCode::Char('c' | 'C') => {
             app.toggle_case();
             app.save_prefs();
@@ -593,9 +667,9 @@ mod tests {
 
     fn load(path: &Path) -> (Vec<String>, u64, u64) {
         let n = Arc::new(AtomicU64::new(0));
-        let (reader, size) = open(path, n.clone()).unwrap();
+        let (reader, stamp) = open(path, n.clone()).unwrap();
         let got = lines(reader).collect();
-        (got, n.load(Ordering::Relaxed), size)
+        (got, n.load(Ordering::Relaxed), stamp.len)
     }
 
     #[test]
@@ -727,6 +801,7 @@ mod tests {
             path: None,
             reader: Box::new(io::Cursor::new(bytes.to_vec())),
             size: None,
+            stamp: None,
         }
     }
 
@@ -757,7 +832,49 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].path.is_some());
 
-        let alone = drop_empty_stdin(vec![parse::FileLog { name: "stdin".into(), path: None, entries: vec![] }]);
+        let alone = drop_empty_stdin(vec![parse::FileLog { name: "stdin".into(), path: None, stamp: None, entries: vec![] }]);
         assert_eq!(alone.len(), 1, "a pipe on its own still reaches the empty-input check");
+    }
+
+    #[test]
+    fn r_asks_for_a_refresh() {
+        let mut app = App::new(parse::parse_lines(vec!["2026-10-16 09:00:00 [INFO] a".into()]), "test".into());
+        on_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), (80, 24));
+        assert!(app.pending_refresh);
+    }
+
+    #[test]
+    fn refresh_notices_only_a_file_that_changed() {
+        let dir = std::env::temp_dir().join(format!("sawmill-refresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let same = dir.join("same.log");
+        let grew = dir.join("grew.log");
+        std::fs::write(&same, "2026-10-16 09:00:00 [INFO] same\n").unwrap();
+        std::fs::write(&grew, "2026-10-16 09:00:01 [INFO] one\n").unwrap();
+        let n = Arc::new(AtomicU64::new(0));
+        let app = App::from_logs(parse_opened(vec![open_path(&same, &n).unwrap(), open_path(&grew, &n).unwrap()]));
+        let (changed, errors) = changed_files(&app);
+        assert!(errors.is_empty());
+        assert!(changed.is_empty(), "a freshly read file is unchanged");
+        assert_eq!(refresh_notice(&changed, &errors).as_deref(), Some("nothing has changed"));
+
+        std::fs::write(&grew, "2026-10-16 09:00:01 [INFO] one\n2026-10-16 09:00:02 [INFO] two\n").unwrap();
+        let (changed, errors) = changed_files(&app);
+        assert!(errors.is_empty());
+        assert_eq!(changed.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1]);
+        assert!(refresh_notice(&changed, &errors).is_none());
+
+        std::fs::remove_file(&same).unwrap();
+        let (changed, errors) = changed_files(&app);
+        assert_eq!(changed.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1], "the grown file is still due");
+        assert_eq!(errors.len(), 1, "the missing file is reported, not reloaded");
+
+        let mut app = app;
+        let reloaded = parse_opened(vec![open_path(&grew, &n).unwrap()]).pop().unwrap();
+        app.replace_files(vec![(1, reloaded)]);
+        let (changed, errors) = changed_files(&app);
+        assert!(changed.is_empty(), "the new stamp is the baseline");
+        assert_eq!(errors.len(), 1, "the missing file is still missing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -668,6 +668,7 @@ const HELP: &[(&str, &str)] = &[
     ("\u{2190} \u{2192}", "scroll long lines sideways"),
     ("Enter", "pattern \u{2192} its lines \u{2192} line in context \u{2192} its pattern"),
     ("a", "all filtered lines, in file order"),
+    ("r", "reload files that changed on disk; filters, bookmarks and this view stay"),
     ("Esc", "clear selection, then find, then go back; on patterns, Files, Settings, Themes or Quit"),
     ("Backspace", "previous time period, then go back"),
     ("e w i d o", "toggle Error Warn Info Debug Other; on a web log, 5xx 4xx 2xx 1xx other"),
